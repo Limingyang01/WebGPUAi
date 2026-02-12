@@ -304,10 +304,13 @@
                             }`}>
                             {content}
                         </div>
-                        {/* 时间和操作按钮 */}
+                        {/* 时间 */}
+                        <div className="mt-1 text-xs text-zinc-500">
+                            {timestamp ? formatTime(timestamp) : ''}
+                        </div>
+                        {/* 复制按钮（仅AI消息） */}
                         {isAssistant && (
                             <div className="flex items-center gap-3 mt-1 text-xs text-zinc-500">
-                                <span>{timestamp ? formatTime(timestamp) : ''}</span>
                                 <button
                                     onClick={handleCopy}
                                     className="flex items-center gap-1 hover:text-zinc-300 transition-colors"
@@ -581,6 +584,8 @@
             // 超轻量级
             { id: 'SmolLM2-360M-Instruct-q4f32_1-MLC', name: 'SmolLM2 360M', desc: '超小，兼容性好' },
             { id: 'Qwen2.5-0.5B-Instruct-q4f32_1-MLC', name: 'Qwen2.5-0.5B', desc: '中文，0.5B参数' },
+            { id: 'Qwen2-1.5B-Instruct-q4f32_1-MLC', name: 'Qwen2-1.5B', desc: '中文，1.5B参数' },
+            { id: 'Qwen2-3B-Instruct-q4f32_1-MLC', name: 'Qwen2-3B', desc: '中文，3B参数' },
             { id: 'Llama-3.2-1B-Instruct-q4f32_1-MLC', name: 'Llama-3.2-1B', desc: '1B参数，英文为主' },
             { id: 'gemma-2-2b-it-q4f32_1-MLC', name: 'Gemma-2-2B', desc: 'Google 2B参数' },
             { id: 'StableLM-2-zephyr-1.6b-chat-q4f32_1-MLC', name: 'StableLM-2-1.6B', desc: '1.6B参数' },
@@ -597,15 +602,14 @@
             { id: 'emotional', name: '情感陪护', systemPrompt: '你是一个温暖贴心的情感陪伴者。用户向你倾诉情感困惑时，你应该：1. 认真倾听，给予理解和共情 2. 提供真诚的建议和观点 3. 用温柔治愈的语气交流 4. 适当给予鼓励和支持 5. 保护用户隐私' },
         ];
 
-        // 时间格式化
+        // 时间格式化（显示到秒）
         const formatTime = (timestamp) => {
+            if (!timestamp) return '';
             const date = new Date(timestamp);
-            const year = date.getFullYear();
-            const month = String(date.getMonth() + 1).padStart(2, '0');
-            const day = String(date.getDate()).padStart(2, '0');
             const hours = String(date.getHours()).padStart(2, '0');
             const minutes = String(date.getMinutes()).padStart(2, '0');
-            return `${year}-${month}-${day} ${hours}:${minutes}`;
+            const seconds = String(date.getSeconds()).padStart(2, '0');
+            return `${hours}:${minutes}:${seconds}`;
         };
 
         // ========== IndexedDB 历史记录模块 ==========
