@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU AI 对话</title>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- WebLLM Module Loader -->
+    <script type="module">
+        // 预加载 WebLLM 模块
+        window.loadWebLLM = async () => {
+            const webllm = await import('https://esm.run/@mlc-ai/web-llm@0.2.79');
+            return webllm;
+        };
+        console.log('WebLLM module loader ready');
+    </script>
+
+    <style>
+        body { margin: 0; padding: 0; background-color: #09090b; overflow-x: hidden; }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 3px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #52525b; }
+        .chat-message { white-space: pre-wrap; word-break: break-word; overflow-wrap: break-word; }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        .animate-spin { animation: spin 1s linear infinite; }
+        .typing-dot { animation: typing 1.4s infinite ease-in-out; }
+        .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+        .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes typing {
+            0%, 60%, 100% { transform: translateY(0); }
+            30% { transform: translateY(-8px); }
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-presets="env,react">
+        const { useState, useRef, useEffect, useCallback, useMemo } = React;
+
+        // Icons
+        const IconWrapper = ({ name, size = 24, className = "" }) => {
+            const iconData = lucide.icons[name];
+            if (!iconData) return null;
+            return React.createElement('svg', {
+                xmlns: "http://www.w3.org/2000/svg",
+                width: size,
+                height: size,
+                viewBox: "0 0 24 24",
+                fill: "none",
+                stroke: "currentColor",
+                strokeWidth: 2,
+                strokeLinecap: "round",
+                strokeLinejoin: "round",
+                className: `lucide lucide-${name} ${className}`,
+            }, ...iconData.map(([tag, attrs]) => React.createElement(tag, attrs)));
+        };
+
+        const BotIcon = (p) => <IconWrapper name="Bot" size={20} {...p} />;
+        const UserIcon = (p) => <IconWrapper name="User" size={20} {...p} />;
+        const Loader2 = (p) => <IconWrapper name="Loader2" size={20} {...p} />;
+        const RefreshCw = (p) => <IconWrapper name="RefreshCw" size={16} {...p} />;
+        const Send = (p) => <IconWrapper name="Send" size={18} {...p} />;
+        const Check = (p) => <IconWrapper name="Check" size={16} {...p} />;
+        const Database = (p) => <IconWrapper name="Database" size={16} {...p} />;
+        const RefreshCcw = (p) => <IconWrapper name="RefreshCcw" size={16} {...p} />;
+        const X = (p) => <IconWrapper name="X" size={18} {...p} />;
+        const UserCircle = (p) => <IconWrapper name="UserCircle" size={16} {...p} />;
+
+        // 模型列表
+        const MODEL_LIST = [
+            // 超轻量级
+            { id: 'SmolLM2-360M-Instruct-q4f32_1-MLC', name: 'SmolLM2 360M', desc: '超小，兼容性好' },
+            { id: 'Qwen2.5-0.5B-Instruct-q4f32_1-MLC', name: 'Qwen2.5-0.5B', desc: '中文，0.5B参数' },
+            { id: 'Qwen2-0.5B-Instruct-q4f32_1-MLC', name: 'Qwen2-0.5B', desc: '中文，旧版格式' },
+            { id: 'Llama-3.2-1B-Instruct-q4f32_1-MLC', name: 'Llama-3.2-1B', desc: '1B参数，英文为主' },
+            { id: 'gemma-2-2b-it-q4f32_1-MLC', name: 'Gemma-2-2B', desc: 'Google 2B参数' },
+            { id: 'StableLM-2-zephyr-1.6b-chat-q4f32_1-MLC', name: 'StableLM-2-1.6B', desc: '1.6B参数' },
+            // 轻量级
+            { id: 'Phi-3.5-mini-instruct-q4f32_1-MLC', name: 'Phi-3.5-mini', desc: '约2GB显存' },
+        ];
+
+        // 角色提示词
+        const ROLE_LIST = [
+            { id: 'default', name: '通用助手', systemPrompt: '你是一个友好的AI助手，请用简洁清晰的语言回答用户的问题。' },
+            { id: 'poet', name: '诗词助手', systemPrompt: '你是一个诗词专家，精通中国古典诗词和现代诗歌。用户向你请教诗词创作、赏析、格律方面的问题时，你应该：1. 分析诗词的意境、韵律、手法 2. 提供创作建议和修改意见 3. 引用相关诗句作为例证 4. 用优美而有诗意的语言表达' },
+            { id: 'writer', name: '写作助手', systemPrompt: '你是一个专业写作导师，擅长各种文体的写作指导。用户向你请教写作问题时，你应该：1. 分析文章结构和写作技巧 2. 提供具体的改进建议 3. 给出写作范例 4. 鼓励用户创作，帮助提升文笔' },
+            { id: 'medical', name: '医护助手', systemPrompt: '你是一个医护健康顾问，主要提供健康知识科普和日常护理建议。注意：1. 强调仅为参考，不能替代医生诊断 2. 建议用户有健康问题及时就医 3. 提供科学可靠的健康知识 4. 用温和关怀的语气交流' },
+            { id: 'emotional', name: '情感陪护', systemPrompt: '你是一个温暖贴心的情感陪伴者。用户向你倾诉情感困惑时，你应该：1. 认真倾听，给予理解和共情 2. 提供真诚的建议和观点 3. 用温柔治愈的语气交流 4. 适当给予鼓励和支持 5. 保护用户隐私' },
+        ];
+
+        // 动态加载 WebLLM（解决 require 问题）
+        let webllm = null;
+        async function getWebLLM() {
+            if (webllm) return webllm;
+            if (window.loadWebLLM) {
+                webllm = await window.loadWebLLM();
+            } else {
+                // Fallback: 直接动态导入
+                webllm = await import('https://esm.run/@mlc-ai/web-llm@0.2.79');
+            }
+            return webllm;
+        }
+
+        function App() {
+            const [engine, setEngine] = useState(null);
+            const [messages, setMessages] = useState([]);
+            const [input, setInput] = useState('');
+            const [loading, setLoading] = useState(false);
+            const [modelLoading, setModelLoading] = useState(false);
+            const [progress, setProgress] = useState(0);
+            const [progressText, setProgressText] = useState('准备中...');
+            const [status, setStatus] = useState('未加载');
+            const [modelId, setModelId] = useState('');
+            const [modelName, setModelName] = useState('');
+            const [roleId, setRoleId] = useState('default');
+            const [isGenerating, setIsGenerating] = useState(false);
+            const chatEndRef = useRef(null);
+            const inputRef = useRef(null);
+            const abortRef = useRef(null);
+
+            // 初始化时检查缓存
+            useEffect(() => {
+                const cached = localStorage.getItem('webllm_last_model');
+                if (cached) {
+                    const model = MODEL_LIST.find(m => m.id === cached);
+                    if (model) {
+                        setModelId(cached);
+                        setModelName(model.name);
+                        // 不自动加载，让用户点击按钮
+                    }
+                }
+            }, []);
+
+            // 获取已缓存的模型列表
+            const [cachedModels, setCachedModels] = useState([]);
+
+            const getCachedModels = async () => {
+                if (!window.indexedDB) return [];
+                return new Promise((resolve) => {
+                    const req = window.indexedDB.open('webllm-cache', 1);
+                    req.onupgradeneeded = (event) => {
+                        const db = event.target.result;
+                        // 创建对象存储（如果不存在）
+                        if (!db.objectStoreNames.contains('model-cache')) {
+                            db.createObjectStore('model-cache', { keyPath: 'id' });
+                        }
+                    };
+                    req.onsuccess = () => {
+                        const db = req.result;
+                        // 检查对象存储是否存在
+                        if (!db.objectStoreNames.contains('model-cache')) {
+                            resolve([]);
+                            return;
+                        }
+                        const transaction = db.transaction(['model-cache'], 'readonly');
+                        const objectStore = transaction.objectStore('model-cache');
+                        const getAllReq = objectStore.getAllKeys();
+                        getAllReq.onsuccess = () => {
+                            resolve(getAllReq.result || []);
+                        };
+                        getAllReq.onerror = () => resolve([]);
+                    };
+                    req.onerror = () => resolve([]);
+                });
+            };
+
+            // 页面加载时检查已缓存的模型
+            useEffect(() => {
+                getCachedModels().then(models => {
+                    setCachedModels(models);
+                });
+            }, []);
+
+            // 消息更新时自动滚动到底部
+            useEffect(() => {
+                if (chatEndRef.current) {
+                    chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+                }
+            }, [messages, isGenerating]);
+
+            // 加载模型
+            const loadModel = async (modelId) => {
+                if (loading) return;
+                setLoading(true);
+                setModelLoading(true);
+                setProgress(0);
+                setStatus('加载中');
+                setProgressText('检查环境...');
+
+                try {
+                    if (!navigator.gpu) {
+                        throw new Error('浏览器不支持 WebGPU，请使用 Chrome 113+ 或 Edge');
+                    }
+
+                    // 如果已经有 engine，先清理
+                    if (engine) {
+                        setEngine(null);
+                        setMessages([]);
+                    }
+
+                    setProgressText('正在加载模型...');
+
+                    // 动态加载 webllm 模块
+                    const webllmModule = await getWebLLM();
+                    const mlcEngine = await webllmModule.CreateMLCEngine(modelId, {
+                        initProgressCallback: (p) => {
+                            let percent = 0;
+                            if (p && typeof p === 'object' && 'progress' in p) {
+                                percent = Math.floor(p.progress * 100);
+                            } else if (typeof p === 'number') {
+                                percent = Math.floor(p * 100);
+                            }
+                            setProgress(percent);
+                            // 只在真正下载时显示下载进度
+                            const msg = p.message || '';
+                            if (msg.includes('Downloading') || msg.includes('download')) {
+                                setProgressText('正在下载模型...');
+                            } else if (msg.includes('Cache') || msg.includes('cache')) {
+                                setProgressText('从缓存加载...');
+                            } else {
+                                setProgressText(msg || '加载中...');
+                            }
+                        },
+                        useIndexedDBCache: true,
+                    });
+
+                    setEngine(mlcEngine);
+                    setStatus('已就绪');
+                    setLoading(false);
+                    setModelLoading(false);
+
+                    // 刷新缓存模型列表
+                    getCachedModels().then(models => setCachedModels(models));
+
+                    // 保存模型选择
+                    localStorage.setItem('webllm_last_model', modelId);
+
+                    // 添加欢迎消息
+                    const modelInfo = MODEL_LIST.find(m => m.id === modelId);
+                    const roleInfo = ROLE_LIST.find(r => r.id === roleId);
+                    const rolePrefix = roleId === 'default' ? '' : `【${roleInfo?.name || ''}】`;
+                    setMessages([{
+                        role: 'assistant',
+                        content: `${rolePrefix}你好！我是运行在浏览器里的本地 AI 模型 (${modelInfo?.name || modelId})。\n有什么可以帮你的吗？`
+                    }]);
+
+                } catch (err) {
+                    console.error('加载错误:', err);
+                    setLoading(false);
+                    setModelLoading(false);
+                    setStatus('错误');
+                    setProgressText(err.message || '加载失败');
+                }
+            };
+
+            // 发送消息
+            const sendMessage = async () => {
+                if (!input.trim() || isGenerating || !engine) return;
+
+                const userMsg = { role: 'user', content: input.trim() };
+                setMessages(prev => [...prev, userMsg]);
+                setInput('');
+                setIsGenerating(true);
+
+                // 自动聚焦输入框
+                setTimeout(() => inputRef.current?.focus(), 100);
+
+                try {
+                    setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+
+                    // 创建 AbortController 用于中断
+                    abortRef.current = new AbortController();
+
+                    // 构建消息列表，包含系统提示词
+                    const roleInfo = ROLE_LIST.find(r => r.id === roleId);
+                    const messages = [
+                        ...(roleId !== 'default' ? [{ role: 'system', content: roleInfo?.systemPrompt || '' }] : []),
+                        { role: 'user', content: userMsg.content }
+                    ];
+
+                    const stream = await engine.chat.completions.create({
+                        messages: messages,
+                        stream: true,
+                        signal: abortRef.current.signal,
+                    });
+
+                    let fullResponse = '';
+                    for await (const chunk of stream) {
+                        if (abortRef.current?.signal.aborted) {
+                            // 用户中断，追加提示
+                            setMessages(prev => {
+                                const last = prev[prev.length - 1];
+                                if (last.role === 'assistant') {
+                                    return [...prev.slice(0, -1), { role: 'assistant', content: fullResponse + ' (...已中断)' }];
+                                }
+                                return prev;
+                            });
+                            return;
+                        }
+                        const token = chunk.choices[0]?.delta?.content || '';
+                        fullResponse += token;
+                        setMessages(prev => {
+                            const last = prev[prev.length - 1];
+                            if (last.role === 'assistant') {
+                                return [...prev.slice(0, -1), { role: 'assistant', content: fullResponse }];
+                            }
+                            return prev;
+                        });
+                    }
+                } catch (err) {
+                    if (err.name === 'AbortError') {
+                        // 被中断
+                        console.log('生成已中断');
+                    } else {
+                        console.error('生成错误:', err);
+                        setMessages(prev => [...prev, { role: 'assistant', content: `错误: ${err.message}` }]);
+                    }
+                }
+
+                setIsGenerating(false);
+                abortRef.current = null;
+
+                // AI 回复结束后聚焦输入框（延迟确保 disabled 已解除）
+                setTimeout(() => {
+                    inputRef.current?.focus();
+                }, 50);
+            };
+
+            // 中断生成
+            const abortGeneration = () => {
+                if (abortRef.current) {
+                    abortRef.current.abort();
+                    setIsGenerating(false);
+                    // 中断后聚焦输入框
+                    setTimeout(() => {
+                        inputRef.current?.focus();
+                    }, 50);
+                }
+            };
+
+            // 按 Enter 发送
+            const handleKeyDown = (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendMessage();
+                }
+            };
+
+            // 选择模型
+            const handleModelChange = async (e) => {
+                const newModelId = e.target.value;
+                if (!newModelId) {
+                    setModelId('');
+                    setModelName('');
+                    return;
+                }
+
+                const model = MODEL_LIST.find(m => m.id === newModelId);
+                setModelId(newModelId);
+                setModelName(model?.name || '');
+
+                // 检查是否已缓存
+                const cached = await getCachedModels();
+                const isCached = cached.includes(newModelId);
+
+                if (isCached) {
+                    // 已缓存，自动加载
+                    loadModel(newModelId);
+                } else {
+                    // 未缓存，清除 engine，不允许对话
+                    setEngine(null);
+                    setMessages([]);
+                    setStatus('未加载');
+                }
+            };
+
+            // 获取当前模型显示名
+            const getCurrentModelDisplay = () => {
+                if (modelName) return modelName;
+                const model = MODEL_LIST.find(m => m.id === modelId);
+                return model?.name || modelId || '未选择';
+            };
+
+            return (
+                <div className="min-h-screen bg-[#09090b] text-white flex items-center justify-center p-4">
+                    <div className="w-full max-w-xl bg-[#18181b] rounded-2xl shadow-2xl overflow-hidden border border-[#27272a]">
+                        {/* Header */}
+                        <div className="bg-gradient-to-r from-violet-600 to-indigo-600 p-4 flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <BotIcon className="text-white" />
+                                <h1 className="text-lg font-semibold">浏览器本地 AI</h1>
+                            </div>
+                            <div className="flex items-center gap-3">
+                                {/* 角色选择 */}
+                                <div className="relative">
+                                    <select
+                                        value={roleId}
+                                        onChange={(e) => {
+                                            setRoleId(e.target.value);
+                                            // 切换角色时重置对话
+                                            if (engine) {
+                                                setMessages([]);
+                                                const roleInfo = ROLE_LIST.find(r => r.id === e.target.value);
+                                                const rolePrefix = e.target.value === 'default' ? '' : `【${roleInfo?.name || ''}】`;
+                                                setMessages([{
+                                                    role: 'assistant',
+                                                    content: `${rolePrefix}你好！我是${roleInfo?.name || 'AI助手'}。\n有什么可以帮你的吗？`
+                                                }]);
+                                            }
+                                        }}
+                                        className="appearance-none bg-white/10 border border-white/20 rounded-full px-3 py-1 pr-8 text-xs text-white focus:outline-none focus:border-white/40 cursor-pointer"
+                                    >
+                                        {ROLE_LIST.map(r => (
+                                            <option key={r.id} value={r.id} className="bg-[#1f1f23]">
+                                                {r.name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <UserCircle className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-white/60" />
+                                </div>
+                                {modelId && (
+                                    <span className="text-xs opacity-80 bg-white/10 px-2 py-1 rounded-full">
+                                        {getCurrentModelDisplay()}
+                                    </span>
+                                )}
+                                <span className={`text-xs px-2 py-1 rounded-full ${
+                                    status === '已就绪' ? 'bg-emerald-500/20 text-emerald-400' :
+                                    status === '错误' ? 'bg-red-500/20 text-red-400' :
+                                    'bg-white/10'
+                                }`}>
+                                    {status}
+                                </span>
+                            </div>
+                        </div>
+
+                        {/* 模型选择 */}
+                        <div className="p-4 bg-[#1f1f23] border-b border-[#27272a]">
+                            <div className="flex gap-2">
+                                <select
+                                    value={modelId}
+                                    onChange={handleModelChange}
+                                    className="flex-1 bg-[#27272a] border border-[#3f3f46] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-violet-500"
+                                >
+                                    <option value="">选择模型...</option>
+                                    {MODEL_LIST.map(m => {
+                                        const isCached = cachedModels.includes(m.id);
+                                        return (
+                                            <option key={m.id} value={m.id}>
+                                                {isCached ? '✓ ' : ''}{m.name} ({m.desc}){isCached ? ' ✓' : ''}
+                                            </option>
+                                        );
+                                    })}
+                                </select>
+                                <button
+                                    onClick={() => getCachedModels().then(models => setCachedModels(models))}
+                                    className="px-3 py-2 bg-[#27272a] border border-[#3f3f46] rounded-lg hover:bg-[#3f3f46] transition-colors flex items-center gap-1.5"
+                                    title="刷新缓存状态"
+                                >
+                                    <Database className={cachedModels.length > 0 ? "text-emerald-400" : "text-zinc-500"} />
+                                    <span className={`text-xs ${cachedModels.length > 0 ? 'text-emerald-400' : 'text-zinc-500'}`}>
+                                        {cachedModels.length}
+                                    </span>
+                                </button>
+                                <button
+                                    onClick={() => modelId && loadModel(modelId)}
+                                    disabled={loading}
+                                    className={`px-4 py-2 rounded-lg flex items-center gap-2 whitespace-nowrap transition-all ${
+                                        loading
+                                            ? 'bg-zinc-600 disabled:opacity-50 cursor-not-allowed'
+                                            : engine
+                                                ? 'bg-emerald-600 hover:bg-emerald-500'
+                                                : 'bg-gradient-to-r from-violet-600 to-indigo-600'
+                                    }`}
+                                >
+                                    {loading ? (
+                                        <>
+                                            <Loader2 className="animate-spin" size={16} />
+                                            加载中
+                                        </>
+                                    ) : engine ? (
+                                        <>
+                                            <RefreshCw size={16} />
+                                            重新加载
+                                        </>
+                                    ) : (
+                                        <>
+                                            <Loader2 size={16} />
+                                            加载模型
+                                        </>
+                                    )}
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* 进度条 */}
+                        {loading && (
+                            <div className="p-4 bg-[#1f1f23] border-b border-[#27272a]">
+                                <div className="flex justify-between text-xs text-zinc-400 mb-2">
+                                    <span>{progressText}</span>
+                                    <span>{progress}%</span>
+                                </div>
+                                <div className="h-1.5 bg-[#3f3f46] rounded-full overflow-hidden">
+                                    <div
+                                        className="h-full bg-gradient-to-r from-violet-600 to-indigo-600 transition-all duration-300"
+                                        style={{ width: `${progress}%` }}
+                                    />
+                                </div>
+                            </div>
+                        )}
+
+                        {/* 聊天区域 */}
+                        <div className="h-[32rem] overflow-y-auto custom-scrollbar p-4 space-y-4">
+                            {messages.length === 0 ? (
+                                <div className="text-center text-zinc-500 py-12">
+                                    <BotIcon className="mx-auto mb-3 opacity-50" />
+                                    <p>请在上方选择模型并点击"加载模型"</p>
+                                    {!modelId && (
+                                        <p className="text-zinc-400 text-sm mt-2">推荐：SmolLM2 360M（超小，兼容性好）</p>
+                                    )}
+                                    {cachedModels.length > 0 && (
+                                        <p className="text-emerald-400 text-sm mt-2">
+                                            已缓存 {cachedModels.length} 个模型（带 ✓ 标记）
+                                        </p>
+                                    )}
+                                </div>
+                            ) : (
+                                messages.map((msg, i) => (
+                                    <div key={i} className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
+                                        <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
+                                            msg.role === 'user' ? 'bg-gradient-to-br from-violet-600 to-indigo-600' : 'bg-[#27272a]'
+                                        }`}>
+                                            {msg.role === 'user' ? <UserIcon /> : <BotIcon />}
+                                        </div>
+                                        <div className={`max-w-[75%] ${
+                                            msg.role === 'user' ? 'text-right' : ''
+                                        }`}>
+                                            <div className={`inline-block px-4 py-2.5 rounded-2xl text-sm chat-message ${
+                                                msg.role === 'user'
+                                                    ? 'bg-gradient-to-br from-violet-600 to-indigo-600 text-white rounded-tr-sm'
+                                                    : 'bg-[#27272a] text-zinc-200 rounded-tl-sm'
+                                            }`}>
+                                                {msg.content || (isGenerating && msg.role === 'assistant' ? (
+                                                    <div className="flex gap-1 py-1">
+                                                        <span className="typing-dot w-1.5 h-1.5 bg-zinc-400 rounded-full"></span>
+                                                        <span className="typing-dot w-1.5 h-1.5 bg-zinc-400 rounded-full"></span>
+                                                        <span className="typing-dot w-1.5 h-1.5 bg-zinc-400 rounded-full"></span>
+                                                    </div>
+                                                ) : '')}
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))
+                            )}
+                            <div ref={chatEndRef} />
+                        </div>
+
+                        {/* 输入区域 */}
+                        <div className="p-4 bg-[#1f1f23] border-t border-[#27272a]">
+                            {modelId && !engine && !loading && (
+                                <div className="mb-2 text-center text-xs text-amber-400">
+                                    该模型未缓存，请点击上方按钮加载模型
+                                </div>
+                            )}
+                            <div className="flex gap-2">
+                                <input
+                                    ref={inputRef}
+                                    type="text"
+                                    value={input}
+                                    onChange={(e) => setInput(e.target.value)}
+                                    onKeyDown={handleKeyDown}
+                                    placeholder={loading ? '模型加载中...' : (!engine ? '请先加载模型' : '输入消息...')}
+                                    disabled={loading || !engine || isGenerating}
+                                    className="flex-1 bg-[#27272a] border border-[#3f3f46] rounded-full px-4 py-2.5 text-sm focus:outline-none focus:border-violet-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                                />
+                                {isGenerating ? (
+                                    <button
+                                        onClick={abortGeneration}
+                                        className="px-4 py-2.5 bg-red-600 hover:bg-red-500 rounded-full transition-colors flex items-center justify-center"
+                                    >
+                                        <IconWrapper name="X" size={18} />
+                                    </button>
+                                ) : (
+                                    <button
+                                        onClick={sendMessage}
+                                        disabled={loading || !engine || isGenerating || !input.trim()}
+                                        className="px-4 py-2.5 bg-gradient-to-r from-violet-600 to-indigo-600 rounded-full disabled:opacity-50 disabled:cursor-not-allowed hover:opacity-90 transition-opacity flex items-center justify-center"
+                                    >
+                                        <Send />
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
