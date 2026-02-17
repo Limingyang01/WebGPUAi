@@ -578,13 +578,13 @@
 
         // 模型列表
         const MODEL_LIST = [
-            // 超轻量级
-            { id: 'SmolLM2-360M-Instruct-q4f32_1-MLC', name: 'SmolLM2 360M', desc: '超小，兼容性好' },
-            { id: 'Qwen2.5-0.5B-Instruct-q4f32_1-MLC', name: 'Qwen2.5-0.5B', desc: '中文，0.5B参数' },
-            { id: 'Qwen2-1.5B-Instruct-q4f32_1-MLC', name: 'Qwen2-1.5B', desc: '中文，1.5B参数' },
-            { id: 'Qwen2.5-3B-Instruct-q4f32_1-MLC', name: 'Qwen2.5-3B', desc: '中文，3B参数' },
-            // 轻量级
-            { id: 'Phi-3.5-mini-instruct-q4f32_1-MLC', name: 'Phi-3.5-mini', desc: '约2GB显存' },
+            // 低显存模型 (<=2GB)
+            { id: 'Qwen2.5-0.5B-Instruct-q4f32_1-MLC', name: 'Qwen2.5-0.5B', desc: '中文，0.5B参数', category: 'low' },
+            { id: 'Qwen2-1.5B-Instruct-q4f32_1-MLC', name: 'Qwen2-1.5B', desc: '中文，1.5B参数', category: 'low' },
+            { id: 'Qwen2.5-3B-Instruct-q4f32_1-MLC', name: 'Qwen2.5-3B', desc: '中文，3B参数', category: 'high' },
+            { id: 'Phi-3.5-mini-instruct-q4f32_1-MLC', name: 'Phi-3.5-mini', desc: '约2GB显存', category: 'high' },
+            // 高显存模型 (>2GB)
+            { id: 'Qwen3-4B-q4f16_1-MLC', name: 'Qwen3-4B', desc: '中文最新，4B参数，推荐', category: 'high' },
         ];
 
         // 角色提示词
@@ -824,7 +824,7 @@
         };
 
         // ========== 模型管理组件 ==========
-        const ModelManager = ({ open, onClose, cachedModels, onRefreshModels, onDeleteModel }) => {
+        const ModelManager = ({ open, onClose, cachedModels, onRefreshModels, onDeleteModel, onClearAll }) => {
             const [syncing, setSyncing] = useState(false);
             const { success, info } = useMessage();
 
@@ -866,8 +866,8 @@
                             </button>
                         </div>
 
-                        {/* 同步按钮 */}
-                        <div className="p-4 border-b border-[#27272a]">
+                        {/* 同步和清理按钮 */}
+                        <div className="p-4 border-b border-[#27272a] space-y-2">
                             <button
                                 onClick={handleRefresh}
                                 disabled={syncing}
@@ -887,6 +887,15 @@
                                     </>
                                 )}
                             </button>
+                            {cachedModels.length > 0 && (
+                                <button
+                                    onClick={onClearAll}
+                                    className="w-full px-3 py-2 rounded-lg text-sm text-red-400 bg-red-500/10 hover:bg-red-500/20 flex items-center justify-center gap-2 transition-colors border border-red-500/30"
+                                >
+                                    <Trash2 size={14} />
+                                    清理所有缓存 ({cachedModels.length})
+                                </button>
+                            )}
                         </div>
 
                         {/* 模型列表 */}
@@ -1378,6 +1387,33 @@
                 }
             };
 
+            // 清理所有模型缓存
+            const handleClearAllCache = async () => {
+                if (cachedModels.length === 0) {
+                    info('没有缓存的模型');
+                    return;
+                }
+                const confirmed = await showConfirm({
+                    title: '清理所有缓存',
+                    content: `确定要删除所有 ${cachedModels.length} 个缓存模型吗？删除后需要重新下载。`,
+                    confirmText: '清理',
+                    cancelText: '取消',
+                    type: 'danger'
+                });
+                if (!confirmed) return;
+                try {
+                    info('正在清理所有模型缓存...');
+                    for (const model of cachedModels) {
+                        await deleteModelCache(model.id);
+                    }
+                    await refreshCachedModels();
+                    success('所有模型缓存已清理');
+                } catch (err) {
+                    console.error('[模型] 清理缓存失败:', err);
+                    error(`清理缓存失败: ${err.message}`);
+                }
+            };
+
             // 页面加载时检查已缓存的模型
             useEffect(() => {
                 getCachedModelsWithInfo().then(models => {
@@ -1836,6 +1872,7 @@
                         cachedModels={cachedModels}
                         onRefreshModels={refreshCachedModels}
                         onDeleteModel={handleDeleteModel}
+                        onClearAll={handleClearAllCache}
                     />
                     <div className="min-h-screen bg-[#09090b] text-white flex items-center justify-center p-4">
                         <div className="w-full max-w-xl bg-[#18181b] rounded-2xl shadow-2xl overflow-hidden border border-[#27272a] relative">
@@ -1875,14 +1912,26 @@
                                     className="flex-1 bg-[#27272a] border border-[#3f3f46] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-violet-500"
                                 >
                                     <option value="">选择模型...</option>
-                                    {MODEL_LIST.map(m => {
-                                        const isCached = cachedModels.some(model => model.id === m.id);
-                                        return (
-                                            <option key={m.id} value={m.id}>
-                                                {isCached ? '✓ ' : ''}{m.name} ({m.desc}){isCached ? ' ✓' : ''}
-                                            </option>
-                                        );
-                                    })}
+                                    <optgroup label="低显存模型 (≤2GB)">
+                                        {MODEL_LIST.filter(m => m.category === 'low').map(m => {
+                                            const isCached = cachedModels.some(model => model.id === m.id);
+                                            return (
+                                                <option key={m.id} value={m.id}>
+                                                    {isCached ? '✓ ' : ''}{m.name} ({m.desc}){isCached ? ' ✓' : ''}
+                                                </option>
+                                            );
+                                        })}
+                                    </optgroup>
+                                    <optgroup label="高显存模型 (>2GB)">
+                                        {MODEL_LIST.filter(m => m.category === 'high').map(m => {
+                                            const isCached = cachedModels.some(model => model.id === m.id);
+                                            return (
+                                                <option key={m.id} value={m.id}>
+                                                    {isCached ? '✓ ' : ''}{m.name} ({m.desc}){isCached ? ' ✓' : ''}
+                                                </option>
+                                            );
+                                        })}
+                                    </optgroup>
                                 </select>
                                 <PrimaryButton
                                     onClick={() => modelId && loadModel(modelId)}
