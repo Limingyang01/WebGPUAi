@@ -6,7 +6,9 @@
       "Bash(node:*)",
       "Bash(python -c:*)",
       "WebFetch(domain:webllm.mlc.ai)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(git -C \"c:/归档/WebGPUAi\" checkout webGPU.html)",
+      "WebFetch(domain:minimax-algeng-chat-tts.oss-cn-wulanchabu.aliyuncs.com)"
     ]
   }
 }
