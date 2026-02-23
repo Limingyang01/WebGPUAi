@@ -57,6 +57,23 @@
         console.log('WebLLM module loader ready');
     </script>
 
+    <!-- Transformers.js for Semantic Search (ES Module) -->
+    <script type="module">
+        // 动态加载 Transformers.js - 使用 jspm CDN
+        window.loadTransformers = async () => {
+            // 先设置环境变量，禁用本地模型加载，强制使用 CDN
+            const transformers = await import('https://jspm.dev/@xenova/transformers');
+
+            // 配置使用 CDN 加载模型
+            transformers.env.allowLocalModels = false;
+            transformers.env.useBrowserCache = true;
+            transformers.env.backends.onnx.wasm.numThreads = 1;
+
+            return transformers;
+        };
+        console.log('Transformers.js module loader ready');
+    </script>
+
     <style>
         body {
             margin: 0;
@@ -290,6 +307,8 @@
         const Upload = (p) => <IconWrapper name="Upload" size={18} {...p} />;
         const FileText = (p) => <IconWrapper name="FileText" size={18} {...p} />;
         const BookOpen = (p) => <IconWrapper name="BookOpen" size={18} {...p} />;
+        const Download = (p) => <IconWrapper name="Download" size={14} {...p} />;
+        const Brain = (p) => <IconWrapper name="Brain" size={14} {...p} />;
 
         // ========== UI 组件 ==========
 
@@ -404,7 +423,6 @@
             const safeContent = isReactElement ? '' : (typeof content === 'string' ? content : String(content || ''));
             const [copied, setCopied] = useState(false);
             const [thinkExpanded, setThinkExpanded] = useState(false);
-            const [referencesExpanded, setReferencesExpanded] = useState(false);
             const isUser = role === 'user';
             const isAssistant = role === 'assistant';
 
@@ -489,33 +507,25 @@
                         </div>
                         {/* 引用来源显示 */}
                         {isAssistant && !isReactElement && retrievedChunks && retrievedChunks.length > 0 && (
-                            <div className="mt-2">
-                                <button
-                                    onClick={() => setReferencesExpanded(!referencesExpanded)}
-                                    className="flex items-center gap-1 text-xs text-violet-500 hover:text-violet-400 transition-colors"
-                                >
-                                    {referencesExpanded ? (
-                                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                                        </svg>
-                                    ) : (
-                                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                                        </svg>
-                                    )}
+                            <div className="mt-3 border-t border-gray-200 dark:border-[#27272a] pt-2">
+                                <div className="flex items-center gap-1 text-xs text-violet-500 mb-2">
                                     <BookOpen size={12} />
-                                    <span>参考资料 ({retrievedChunks.length})</span>
-                                </button>
-                                {referencesExpanded && (
-                                    <div className="mt-2 space-y-2">
-                                        {retrievedChunks.map((chunk, i) => (
-                                            <div key={i} className="text-xs bg-gray-50 dark:bg-[#1f1f23] rounded-lg p-2 border border-gray-200 dark:border-[#27272a]">
-                                                <div className="font-medium text-violet-500 mb-1">来源 {i + 1}{chunk.sourceName ? ` - ${chunk.sourceName}` : ''}</div>
-                                                <div className="text-gray-600 dark:text-zinc-400 line-clamp-3">{chunk.content}</div>
+                                    <span className="font-medium">参考资料 ({retrievedChunks.length})</span>
+                                </div>
+                                <div className="space-y-2">
+                                    {retrievedChunks.map((chunk, i) => (
+                                        <div key={i} className="text-xs bg-gray-50 dark:bg-[#1f1f23] rounded-lg p-2 border border-gray-200 dark:border-[#27272a]">
+                                            <div className="font-medium text-violet-500 mb-1 flex items-center gap-1">
+                                                <span className="bg-violet-500/20 px-1.5 py-0.5 rounded">来源 {i + 1}</span>
+                                                {chunk.sourceName && <span className="text-violet-400">- {chunk.sourceName}</span>}
+                                                {chunk.similarity !== undefined && (
+                                                    <span className="ml-auto text-cyan-500">相似度: {Math.round(chunk.similarity * 100)}%</span>
+                                                )}
                                             </div>
-                                        ))}
-                                    </div>
-                                )}
+                                            <div className="text-gray-600 dark:text-zinc-400 line-clamp-3">{chunk.content}</div>
+                                        </div>
+                                    ))}
+                                </div>
                             </div>
                         )}
                     </div>
@@ -1253,11 +1263,63 @@
                             content,
                             index,
                             createdAt: now,
+                            embedding: null, // 新增：语义向量（将在后续计算填充）
                         });
                     });
 
                     transaction.oncomplete = () => resolve();
                     transaction.onerror = () => reject(transaction.error);
+                });
+            },
+
+            // 批量更新 chunk 的 embedding
+            async updateChunksEmbedding(chunksWithEmbedding) {
+                const db = await this.open();
+                return new Promise((resolve, reject) => {
+                    const transaction = db.transaction(['chunks'], 'readwrite');
+                    const store = transaction.objectStore('chunks');
+
+                    // 先获取所有现有的 chunks
+                    const getAllRequest = store.getAll();
+                    getAllRequest.onsuccess = () => {
+                        const allChunks = getAllRequest.result || [];
+                        const chunksMap = new Map(allChunks.map(c => [c.id, c]));
+
+                        // 更新每个 chunk 的 embedding，保留其他字段
+                        chunksWithEmbedding.forEach(({ id, embedding }) => {
+                            const existingChunk = chunksMap.get(id);
+                            if (existingChunk) {
+                                existingChunk.embedding = embedding;
+                                store.put(existingChunk);
+                            }
+                        });
+
+                        transaction.oncomplete = () => resolve();
+                        transaction.onerror = () => reject(transaction.error);
+                    };
+                    getAllRequest.onerror = () => reject(getAllRequest.error);
+                });
+            },
+
+            // 获取所有有 embedding 的 chunks
+            async getChunksWithEmbedding(knowledgeBaseId) {
+                const db = await this.open();
+                return new Promise(async (resolve, reject) => {
+                    const docs = await this.getDocumentsByKnowledgeBase(knowledgeBaseId);
+                    const docIds = docs.map(d => d.id);
+
+                    const transaction = db.transaction(['chunks'], 'readonly');
+                    const store = transaction.objectStore('chunks');
+                    const request = store.getAll();
+                    request.onsuccess = () => {
+                        const allChunks = request.result || [];
+                        console.log('[getChunksWithEmbedding] 所有chunks:', allChunks.length);
+                        // 过滤出属于该知识库且有 embedding 的文本块
+                        const filtered = allChunks.filter(c => docIds.includes(c.documentId) && c.embedding != null);
+                        console.log('[getChunksWithEmbedding] 过滤后chunks:', filtered.length, 'docIds:', docIds);
+                        resolve(filtered);
+                    };
+                    request.onerror = () => reject(request.error);
                 });
             },
 
@@ -1282,7 +1344,9 @@
                 return new Promise(async (resolve, reject) => {
                     // 获取该知识库下所有文档
                     const docs = await this.getDocumentsByKnowledgeBase(knowledgeBaseId);
+                    console.log('[getAllChunks] 知识库ID:', knowledgeBaseId, '文档列表:', docs);
                     const docIds = docs.map(d => d.id);
+                    console.log('[getAllChunks] 文档IDs:', docIds);
 
                     const db2 = await this.open();
                     const transaction = db2.transaction(['chunks'], 'readonly');
@@ -1290,13 +1354,150 @@
                     const request = store.getAll();
                     request.onsuccess = () => {
                         const allChunks = request.result || [];
+                        console.log('[getAllChunks] 所有chunks数量:', allChunks.length);
                         // 过滤出属于该知识库的文本块
                         const filtered = allChunks.filter(c => docIds.includes(c.documentId));
+                        console.log('[getAllChunks] 过滤后chunks数量:', filtered.length);
                         resolve(filtered);
                     };
                     request.onerror = () => reject(request.error);
                 });
             },
+        };
+
+        // ========== Transformers.js 语义检索模块 ==========
+        const SemanticSearch = {
+            // Embedding 模型（多语言支持）
+            modelName: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2',
+            pipeline: null,
+            isLoading: false,
+            loadProgress: null,
+
+            // 加载 embedding 模型
+            async loadModel(onProgress) {
+                if (this.pipeline) {
+                    return this.pipeline;
+                }
+
+                if (this.isLoading) {
+                    // 等待现有加载完成
+                    while (this.isLoading) {
+                        await new Promise(r => setTimeout(r, 100));
+                    }
+                    return this.pipeline;
+                }
+
+                this.isLoading = true;
+                this.loadProgress = onProgress;
+
+                try {
+                    // 动态加载 Transformers.js
+                    const transformers = await window.loadTransformers();
+
+                    // 使用 Transformers.js 的 pipeline
+                    this.pipeline = await transformers.pipeline(
+                        'feature-extraction',
+                        this.modelName,
+                        {
+                            quantized: true
+                        }
+                    );
+                    console.log('Embedding 模型加载完成');
+                    return this.pipeline;
+                } catch (error) {
+                    console.error('Embedding 模型加载失败:', error);
+                    throw error;
+                } finally {
+                    this.isLoading = false;
+                }
+            },
+
+            // 计算单个文本的 embedding
+            async getEmbedding(text) {
+                if (!this.pipeline) {
+                    await this.loadModel();
+                }
+
+                const result = await this.pipeline(text, {
+                    pooling: 'mean',
+                    normalize: true
+                });
+
+                // 转换为普通数组
+                return Array.from(result.data);
+            },
+
+            // 批量计算多个文本的 embedding
+            async getEmbeddings(texts, onChunkProgress) {
+                if (!this.pipeline) {
+                    await this.loadModel(onChunkProgress);
+                }
+
+                const embeddings = [];
+                const total = texts.length;
+
+                for (let i = 0; i < texts.length; i++) {
+                    const embedding = await this.getEmbedding(texts[i]);
+                    embeddings.push(embedding);
+
+                    if (onChunkProgress) {
+                        onChunkProgress(i + 1, total);
+                    }
+                }
+
+                return embeddings;
+            },
+
+            // 计算余弦相似度
+            cosineSimilarity(vec1, vec2) {
+                if (vec1.length !== vec2.length) return 0;
+
+                let dotProduct = 0;
+                let norm1 = 0;
+                let norm2 = 0;
+
+                for (let i = 0; i < vec1.length; i++) {
+                    dotProduct += vec1[i] * vec2[i];
+                    norm1 += vec1[i] * vec1[i];
+                    norm2 += vec2[i] * vec2[i];
+                }
+
+                const denominator = Math.sqrt(norm1) * Math.sqrt(norm2);
+                if (denominator === 0) return 0;
+
+                return dotProduct / denominator;
+            },
+
+            // 语义检索
+            async semanticSearch(chunks, query, topK = 5) {
+                if (!chunks || chunks.length === 0 || !query) {
+                    return [];
+                }
+
+                // 计算查询的 embedding
+                const queryEmbedding = await this.getEmbedding(query);
+
+                // 计算每个 chunk 与查询的相似度
+                const scoredChunks = chunks.map(chunk => {
+                    let similarity = 0;
+
+                    if (chunk.embedding && chunk.embedding.length > 0) {
+                        similarity = this.cosineSimilarity(queryEmbedding, chunk.embedding);
+                    }
+
+                    return {
+                        ...chunk,
+                        score: similarity,
+                        similarity: similarity
+                    };
+                });
+
+                // 按相似度排序并返回 topK
+                return scoredChunks
+                    .filter(c => c.score > 0)
+                    .sort((a, b) => b.score - a.score)
+                    .slice(0, topK);
+            }
         };
 
         // ========== 文本分块工具 ==========
@@ -2086,6 +2287,9 @@ ${context}
             const [knowledgeEnabled, setKnowledgeEnabled] = useState(() => localStorage.getItem('pudding_knowledge_enabled') === 'true');
             const [knowledgeDocuments, setKnowledgeDocuments] = useState({});
             const [retrievedChunks, setRetrievedChunks] = useState([]);
+            const [isEmbeddingLoading, setIsEmbeddingLoading] = useState(false);
+            const [embeddingProgress, setEmbeddingProgress] = useState(null);
+            const [embeddingModelLoaded, setEmbeddingModelLoaded] = useState(() => localStorage.getItem('pudding_embedding_model_loaded') === 'true');
 
             // 知识库开关状态持久化
             useEffect(() => {
@@ -2480,7 +2684,7 @@ ${context}
                 }
             };
 
-            // 上传文档（关键词检索）
+            // 上传文档（支持关键词检索和语义检索）
             const handleUploadDocument = async (kbId, file, onProgress) => {
                 const fileType = file.name.split('.').pop()?.toLowerCase();
                 if (!['txt', 'md', 'text'].includes(fileType)) {
@@ -2504,6 +2708,7 @@ ${context}
                 // 文本分块
                 const chunks = chunkText(content, 500, 50);
                 info(`文本已分成 ${chunks.length} 个片段`);
+                console.log('[上传] 分块数量:', chunks.length);
 
                 // 添加文档记录
                 const doc = await KnowledgeDB.addDocument({
@@ -2514,11 +2719,47 @@ ${context}
                     chunkCount: chunks.length,
                     status: 'completed'
                 });
+                console.log('[上传] 文档ID:', doc.id, '知识库ID:', kbId);
 
                 // 添加文本块
                 await KnowledgeDB.addChunks(doc.id, chunks);
+                console.log('[上传] chunks 已保存');
 
-                success(`文档上传完成，已分成 ${chunks.length} 个片段`);
+                // 自动计算语义向量（结合语义检索和关键词检索的优点）
+                info('正在计算语义向量...');
+
+                try {
+                    // 加载 embedding 模型
+                    if (onProgress) onProgress('正在加载语义模型...');
+                    await SemanticSearch.loadModel();
+
+                    // 获取刚添加的 chunks（包含 id）
+                    const savedChunks = await KnowledgeDB.getChunksByDocument(doc.id);
+
+                    // 批量计算 embedding
+                    const chunkContents = savedChunks.map(c => c.content);
+                    const embeddings = await SemanticSearch.getEmbeddings(chunkContents, (current, total) => {
+                        if (onProgress) {
+                            onProgress(`计算向量: ${current}/${total}`);
+                        }
+                    });
+
+                    // 更新 chunks 的 embedding
+                    const chunksWithEmbedding = savedChunks.map((chunk, i) => ({
+                        id: chunk.id,
+                        embedding: embeddings[i]
+                    }));
+                    await KnowledgeDB.updateChunksEmbedding(chunksWithEmbedding);
+
+                    success(`文档上传完成，已分成 ${chunks.length} 个片段并计算语义向量`);
+                    setEmbeddingModelLoaded(true);
+                    localStorage.setItem('pudding_embedding_model_loaded', 'true');
+                    console.log('[知识库] embedding 保存完成');
+                } catch (err) {
+                    console.error('[知识库] 计算 embedding 失败:', err);
+                    warning('语义向量计算失败，将使用关键词检索');
+                    success(`文档上传完成，已分成 ${chunks.length} 个片段`);
+                }
 
                 // 刷新知识库数据
                 await loadKnowledgeBases();
@@ -2548,18 +2789,50 @@ ${context}
                 }
             };
 
-            // 知识库问答检索（检索所有知识库）
+            // 知识库问答检索（语义优先，关键词备用）
             const retrieveFromKnowledgeBase = async (query) => {
                 if (!knowledgeEnabled || !query.trim()) {
                     return [];
                 }
 
                 try {
-                    // 获取所有知识库的文本块
+                    console.log('[知识库] 开始检索:', query);
+
+                    // 优先语义检索
+                    let allChunksWithEmbedding = [];
+                    for (const kb of knowledgeBases) {
+                        // 获取有 embedding 的 chunks
+                        const chunks = await KnowledgeDB.getChunksWithEmbedding(kb.id);
+                        console.log(`[知识库] ${kb.name} 有 embedding 的 chunks: ${chunks.length}`);
+                        // 为每个块添加来源信息
+                        const chunksWithSource = chunks.map(chunk => ({
+                            ...chunk,
+                            sourceName: kb.name
+                        }));
+                        allChunksWithEmbedding = allChunksWithEmbedding.concat(chunksWithSource);
+                    }
+
+                    console.log(`[知识库] 总共有 embedding 的 chunks: ${allChunksWithEmbedding.length}`);
+
+                    // 如果有语义向量数据，优先使用语义检索
+                    if (allChunksWithEmbedding.length > 0) {
+                        try {
+                            console.log('[知识库] 执行语义检索...');
+                            const semanticResults = await SemanticSearch.semanticSearch(allChunksWithEmbedding, query, 5);
+                            console.log('[知识库] 语义检索结果:', semanticResults.length);
+                            if (semanticResults.length > 0) {
+                                return semanticResults;
+                            }
+                        } catch (err) {
+                            console.warn('[知识库] 语义检索失败，回退到关键词检索:', err);
+                        }
+                    }
+
+                    // 语义检索无结果或无 embedding，回退到关键词检索
+                    console.log('[知识库] 回退到关键词检索...');
                     let allChunks = [];
                     for (const kb of knowledgeBases) {
                         const chunks = await KnowledgeDB.getAllChunks(kb.id);
-                        // 为每个块添加来源信息
                         const chunksWithSource = chunks.map(chunk => ({
                             ...chunk,
                             sourceName: kb.name
@@ -2567,11 +2840,14 @@ ${context}
                         allChunks = allChunks.concat(chunksWithSource);
                     }
 
+                    console.log(`[知识库] 总 chunks: ${allChunks.length}`);
+
                     if (allChunks.length === 0) return [];
 
                     // 关键词检索
-                    const results = searchChunks(allChunks, query, 5);
-                    return results;
+                    const keywordResults = searchChunks(allChunks, query, 5);
+                    console.log('[知识库] 关键词检索结果:', keywordResults.length);
+                    return keywordResults;
                 } catch (err) {
                     console.error('[知识库] 检索失败:', err);
                     return [];
@@ -2581,6 +2857,10 @@ ${context}
             // 页面加载时加载知识库列表
             useEffect(() => {
                 loadKnowledgeBases();
+                // 检查语义模型是否已加载过（从 localStorage 读取）
+                if (localStorage.getItem('pudding_embedding_model_loaded') === 'true') {
+                    setEmbeddingModelLoaded(true);
+                }
             }, []);
 
             // 页面加载时检查已缓存的模型
@@ -3223,6 +3503,74 @@ ${context}
                                         />
                                     </button>
                                 </div>
+                                {/* 语义模型下载按钮 */}
+                                {knowledgeEnabled && (
+                                    <div className="flex items-center gap-1.5" title="下载语义检索模型（用于语义向量计算）">
+                                        {isEmbeddingLoading ? (
+                                            <div className="flex items-center gap-1">
+                                                <Brain className="text-cyan-400 animate-pulse" />
+                                                <span className="text-xs text-cyan-400">{embeddingProgress || '加载中...'}</span>
+                                            </div>
+                                        ) : embeddingModelLoaded ? (
+                                            <button
+                                                onClick={() => {
+                                                    info('语义模型已加载');
+                                                }}
+                                                className="flex items-center gap-1 px-2 py-1 rounded-lg bg-green-500/20 text-green-400 text-xs"
+                                                title="语义模型已就绪"
+                                            >
+                                                <Brain size={12} />
+                                                <span>已就绪</span>
+                                            </button>
+                                        ) : (
+                                            <button
+                                                onClick={async () => {
+                                                    if (knowledgeBases.length === 0) {
+                                                        warning('请先创建知识库');
+                                                        return;
+                                                    }
+                                                    setIsEmbeddingLoading(true);
+                                                    setEmbeddingProgress('正在加载语义模型...');
+                                                    try {
+                                                        await SemanticSearch.loadModel();
+                                                        // 检查是否有未计算 embedding 的知识库
+                                                        for (const kb of knowledgeBases) {
+                                                            const chunks = await KnowledgeDB.getChunksWithEmbedding(kb.id);
+                                                            const allChunks = await KnowledgeDB.getAllChunks(kb.id);
+                                                            if (allChunks.length > chunks.length) {
+                                                                // 有未计算 embedding 的 chunk
+                                                                setEmbeddingProgress(`正在计算 "${kb.name}" 的语义向量...`);
+                                                                const chunksWithoutEmbedding = allChunks.filter(c => !c.embedding || c.embedding.length === 0);
+                                                                const chunkContents = chunksWithoutEmbedding.map(c => c.content);
+                                                                const embeddings = await SemanticSearch.getEmbeddings(chunkContents, (current, total) => {
+                                                                    setEmbeddingProgress(`计算向量: ${current}/${total}`);
+                                                                });
+                                                                const chunksWithEmbedding = chunksWithoutEmbedding.map((chunk, i) => ({
+                                                                    id: chunk.id,
+                                                                    embedding: embeddings[i]
+                                                                }));
+                                                                await KnowledgeDB.updateChunksEmbedding(chunksWithEmbedding);
+                                                            }
+                                                        }
+                                                        setEmbeddingModelLoaded(true);
+                                            localStorage.setItem('pudding_embedding_model_loaded', 'true');
+                                                        success('语义模型加载完成');
+                                                    } catch (err) {
+                                                        console.error('[语义模型] 加载失败:', err);
+                                                        error('语义模型加载失败');
+                                                    } finally {
+                                                        setIsEmbeddingLoading(false);
+                                                        setEmbeddingProgress(null);
+                                                    }
+                                                }}
+                                                className="flex items-center gap-1 px-2 py-1 rounded-lg bg-cyan-500/20 text-cyan-400 text-xs hover:bg-cyan-500/30 transition-colors"
+                                            >
+                                                <Download size={12} />
+                                                <span>下载语义模型</span>
+                                            </button>
+                                        )}
+                                    </div>
+                                )}
                                 <select
                                     value={modelId}
                                     onChange={handleModelChange}
