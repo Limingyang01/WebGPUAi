@@ -18,13 +18,26 @@
     <script>
         // 初始化主题类
         (function() {
-            const savedTheme = localStorage.getItem('pudding_theme');
-            if (savedTheme === 'dark' || !savedTheme) {
-                document.documentElement.classList.add('dark');
-                document.body.style.backgroundColor = '#09090b';
+            if (!document.body) {
+                document.addEventListener('DOMContentLoaded', function() {
+                    const savedTheme = localStorage.getItem('pudding_theme');
+                    if (savedTheme === 'dark' || !savedTheme) {
+                        document.documentElement.classList.add('dark');
+                        document.body.style.backgroundColor = '#09090b';
+                    } else {
+                        document.documentElement.classList.remove('dark');
+                        document.body.style.backgroundColor = '#ffffff';
+                    }
+                });
             } else {
-                document.documentElement.classList.remove('dark');
-                document.body.style.backgroundColor = '#ffffff';
+                const savedTheme = localStorage.getItem('pudding_theme');
+                if (savedTheme === 'dark' || !savedTheme) {
+                    document.documentElement.classList.add('dark');
+                    document.body.style.backgroundColor = '#09090b';
+                } else {
+                    document.documentElement.classList.remove('dark');
+                    document.body.style.backgroundColor = '#ffffff';
+                }
             }
         })();
     </script>
@@ -268,6 +281,11 @@
         const Bot = (p) => <IconWrapper name="Bot" size={22} {...p} />;
         const Sun = (p) => <IconWrapper name="Sun" size={20} {...p} />;
         const Moon = (p) => <IconWrapper name="Moon" size={20} {...p} />;
+        const Plus = (p) => <IconWrapper name="Plus" size={18} {...p} />;
+        const CheckCircle = (p) => <IconWrapper name="CheckCircle" size={18} {...p} />;
+        const Upload = (p) => <IconWrapper name="Upload" size={18} {...p} />;
+        const FileText = (p) => <IconWrapper name="FileText" size={18} {...p} />;
+        const BookOpen = (p) => <IconWrapper name="BookOpen" size={18} {...p} />;
 
         // ========== UI 组件 ==========
 
@@ -375,16 +393,19 @@
         );
 
         // 消息气泡组件
-        const MessageBubble = ({ role, content, timestamp }) => {
+        const MessageBubble = ({ role, content, timestamp, retrievedChunks }) => {
+            // 确保 content 是字符串
+            const safeContent = typeof content === 'string' ? content : String(content || '');
             const [copied, setCopied] = useState(false);
             const [thinkExpanded, setThinkExpanded] = useState(false);
+            const [referencesExpanded, setReferencesExpanded] = useState(false);
             const isUser = role === 'user';
             const isAssistant = role === 'assistant';
 
             // 提取 think 内容
             const extractThinkContent = (text) => {
                 // 如果不是字符串，直接返回
-                if (!text || typeof text !== 'string') return { main: text, think: '' };
+                if (!text || typeof text !== 'string') return { main: String(text || ''), think: '' };
                 const startIdx = text.indexOf(THINK_START);
                 const endIdx = text.indexOf(THINK_END);
                 if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
@@ -395,11 +416,11 @@
                 return { main: text, think: '' };
             };
 
-            const { main, think } = extractThinkContent(content);
+            const { main, think } = extractThinkContent(safeContent);
             const hasThink = !!think;
 
             const handleCopy = () => {
-                const textToCopy = hasThink ? main : content;
+                const textToCopy = hasThink ? main : safeContent;
                 if (typeof textToCopy === 'string') {
                     navigator.clipboard.writeText(textToCopy);
                     setCopied(true);
@@ -444,8 +465,8 @@
                             ? 'bg-gradient-to-br from-violet-600 to-indigo-600 text-white rounded-tr-sm'
                             : 'bg-gray-100 dark:bg-[#27272a] text-gray-800 dark:text-zinc-200 rounded-tl-sm'
                             }`}>
-                            {isUser ? content : (
-                                hasThink ? <span dangerouslySetInnerHTML={{ __html: parseMarkdown(main) }} /> : <span dangerouslySetInnerHTML={{ __html: parseMarkdown(content) }} />
+                            {isUser ? safeContent : (
+                                hasThink ? <span dangerouslySetInnerHTML={{ __html: parseMarkdown(main) }} /> : <span dangerouslySetInnerHTML={{ __html: parseMarkdown(safeContent) }} />
                             )}
                         </div>
                         {/* 时间和复制按钮（仅AI消息） */}
@@ -460,6 +481,37 @@
                                 </button>
                             )}
                         </div>
+                        {/* 引用来源显示 */}
+                        {isAssistant && retrievedChunks && retrievedChunks.length > 0 && (
+                            <div className="mt-2">
+                                <button
+                                    onClick={() => setReferencesExpanded(!referencesExpanded)}
+                                    className="flex items-center gap-1 text-xs text-violet-500 hover:text-violet-400 transition-colors"
+                                >
+                                    {referencesExpanded ? (
+                                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                        </svg>
+                                    ) : (
+                                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                        </svg>
+                                    )}
+                                    <BookOpen size={12} />
+                                    <span>参考资料 ({retrievedChunks.length})</span>
+                                </button>
+                                {referencesExpanded && (
+                                    <div className="mt-2 space-y-2">
+                                        {retrievedChunks.map((chunk, i) => (
+                                            <div key={i} className="text-xs bg-gray-50 dark:bg-[#1f1f23] rounded-lg p-2 border border-gray-200 dark:border-[#27272a]">
+                                                <div className="font-medium text-violet-500 mb-1">来源 {i + 1}{chunk.sourceName ? ` - ${chunk.sourceName}` : ''}</div>
+                                                <div className="text-gray-600 dark:text-zinc-400 line-clamp-3">{chunk.content}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
                     </div>
                 </div>
             );
@@ -746,7 +798,8 @@
 
         // 简单的 Markdown 解析函数
         const parseMarkdown = (text) => {
-            if (!text || typeof text !== 'string') return text;
+            if (!text) return '';
+            if (typeof text !== 'string') return String(text);
 
             // 先处理代码块（避免其他转换影响代码块内的内容）
             let html = text;
@@ -959,6 +1012,422 @@
                     request.onerror = () => reject(request.error);
                 });
             },
+        };
+
+        // ========== 知识库 IndexedDB 模块 ==========
+        const KnowledgeDB = {
+            dbName: 'pudding-knowledge-db',
+            version: 1,
+
+            open() {
+                return new Promise((resolve, reject) => {
+                    const request = indexedDB.open(this.dbName, this.version);
+                    request.onerror = () => reject(request.error);
+                    request.onsuccess = () => resolve(request.result);
+                    request.onupgradeneeded = (event) => {
+                        const db = event.target.result;
+                        // 知识库存储
+                        if (!db.objectStoreNames.contains('knowledgeBases')) {
+                            const kbStore = db.createObjectStore('knowledgeBases', { keyPath: 'id', autoIncrement: true });
+                            kbStore.createIndex('name', 'name', { unique: false });
+                        }
+                        // 文档存储
+                        if (!db.objectStoreNames.contains('documents')) {
+                            const docStore = db.createObjectStore('documents', { keyPath: 'id', autoIncrement: true });
+                            docStore.createIndex('knowledgeBaseId', 'knowledgeBaseId', { unique: false });
+                        }
+                        // 文本块存储
+                        if (!db.objectStoreNames.contains('chunks')) {
+                            const chunkStore = db.createObjectStore('chunks', { keyPath: 'id', autoIncrement: true });
+                            chunkStore.createIndex('documentId', 'documentId', { unique: false });
+                            chunkStore.createIndex('content', 'content', { unique: false });
+                        }
+                    };
+                });
+            },
+
+            // 知识库 CRUD
+            async createKnowledgeBase(data) {
+                const db = await this.open();
+                return new Promise((resolve, reject) => {
+                    const transaction = db.transaction(['knowledgeBases'], 'readwrite');
+                    const store = transaction.objectStore('knowledgeBases');
+                    const now = Date.now();
+                    const kbData = {
+                        name: data.name || '未命名知识库',
+                        description: data.description || '',
+                        documentCount: 0,
+                        createdAt: now,
+                        updatedAt: now,
+                    };
+                    const request = store.add(kbData);
+                    request.onsuccess = () => resolve({ ...kbData, id: request.result });
+                    request.onerror = () => reject(request.error);
+                });
+            },
+
+            async getAllKnowledgeBases() {
+                const db = await this.open();
+                return new Promise((resolve, reject) => {
+                    const transaction = db.transaction(['knowledgeBases'], 'readonly');
+                    const store = transaction.objectStore('knowledgeBases');
+                    const request = store.getAll();
+                    request.onsuccess = () => {
+                        const kbs = request.result || [];
+                        kbs.sort((a, b) => b.updatedAt - a.updatedAt);
+                        resolve(kbs);
+                    };
+                    request.onerror = () => reject(request.error);
+                });
+            },
+
+            async getKnowledgeBase(id) {
+                const db = await this.open();
+                return new Promise((resolve, reject) => {
+                    const transaction = db.transaction(['knowledgeBases'], 'readonly');
+                    const store = transaction.objectStore('knowledgeBases');
+                    const request = store.get(id);
+                    request.onsuccess = () => resolve(request.result);
+                    request.onerror = () => reject(request.error);
+                });
+            },
+
+            async updateKnowledgeBase(id, data) {
+                const db = await this.open();
+                return new Promise((resolve, reject) => {
+                    const transaction = db.transaction(['knowledgeBases'], 'readwrite');
+                    const store = transaction.objectStore('knowledgeBases');
+                    const getRequest = store.get(id);
+                    getRequest.onsuccess = () => {
+                        const existing = getRequest.result || {};
+                        const updated = { ...existing, ...data, updatedAt: Date.now() };
+                        const putRequest = store.put(updated);
+                        putRequest.onsuccess = () => resolve(updated);
+                        putRequest.onerror = () => reject(putRequest.error);
+                    };
+                    getRequest.onerror = () => reject(getRequest.error);
+                });
+            },
+
+            async deleteKnowledgeBase(id) {
+                const db = await this.open();
+                return new Promise((resolve, reject) => {
+                    // 删除知识库
+                    const transaction = db.transaction(['knowledgeBases', 'documents', 'chunks'], 'readwrite');
+                    const kbStore = transaction.objectStore('knowledgeBases');
+                    kbStore.delete(id);
+
+                    // 删除相关文档
+                    const docStore = transaction.objectStore('documents');
+                    const docIndex = docStore.index('knowledgeBaseId');
+                    const docRequest = docIndex.getAllKeys(id);
+                    docRequest.onsuccess = () => {
+                        const docKeys = docRequest.result;
+                        docKeys.forEach(key => docStore.delete(key));
+
+                        // 删除相关文本块
+                        const chunkStore = transaction.objectStore('chunks');
+                        docKeys.forEach(docId => {
+                            const chunkIndex = chunkStore.index('documentId');
+                            const chunkRequest = chunkIndex.getAllKeys(docId);
+                            chunkRequest.onsuccess = () => {
+                                chunkRequest.result.forEach(key => chunkStore.delete(key));
+                            };
+                        });
+                    };
+
+                    transaction.oncomplete = () => resolve();
+                    transaction.onerror = () => reject(transaction.error);
+                });
+            },
+
+            // 文档 CRUD
+            async addDocument(data) {
+                const db = await this.open();
+                return new Promise((resolve, reject) => {
+                    const transaction = db.transaction(['documents', 'knowledgeBases'], 'readwrite');
+                    const store = transaction.objectStore('documents');
+                    const now = Date.now();
+                    const docData = {
+                        knowledgeBaseId: data.knowledgeBaseId,
+                        name: data.name,
+                        type: data.type,
+                        content: data.content,
+                        chunkCount: data.chunkCount || 0,
+                        status: data.status || 'pending',
+                        createdAt: now,
+                    };
+                    const request = store.add(docData);
+
+                    // 更新知识库文档计数
+                    transaction.oncomplete = async () => {
+                        const kb = await this.getKnowledgeBase(data.knowledgeBaseId);
+                        if (kb) {
+                            await this.updateKnowledgeBase(data.knowledgeBaseId, {
+                                documentCount: (kb.documentCount || 0) + 1
+                            });
+                        }
+                    };
+
+                    request.onsuccess = () => resolve({ ...docData, id: request.result });
+                    request.onerror = () => reject(request.error);
+                });
+            },
+
+            async getDocumentsByKnowledgeBase(knowledgeBaseId) {
+                const db = await this.open();
+                return new Promise((resolve, reject) => {
+                    const transaction = db.transaction(['documents'], 'readonly');
+                    const store = transaction.objectStore('documents');
+                    const index = store.index('knowledgeBaseId');
+                    const request = index.getAll(knowledgeBaseId);
+                    request.onsuccess = () => {
+                        const docs = request.result || [];
+                        docs.sort((a, b) => b.createdAt - a.createdAt);
+                        resolve(docs);
+                    };
+                    request.onerror = () => reject(request.error);
+                });
+            },
+
+            async deleteDocument(id) {
+                const db = await this.open();
+                return new Promise((resolve, reject) => {
+                    const transaction = db.transaction(['documents', 'chunks', 'knowledgeBases'], 'readwrite');
+
+                    // 获取文档信息
+                    const docStore = transaction.objectStore('documents');
+                    const getRequest = docStore.get(id);
+                    getRequest.onsuccess = async () => {
+                        const doc = getRequest.result;
+                        if (!doc) {
+                            resolve();
+                            return;
+                        }
+
+                        // 删除文档
+                        docStore.delete(id);
+
+                        // 删除相关文本块
+                        const chunkStore = transaction.objectStore('chunks');
+                        const chunkIndex = chunkStore.index('documentId');
+                        const chunkRequest = chunkIndex.getAllKeys(id);
+                        chunkRequest.onsuccess = () => {
+                            chunkRequest.result.forEach(key => chunkStore.delete(key));
+                        };
+
+                        // 更新知识库计数
+                        const kbStore = transaction.objectStore('knowledgeBases');
+                        const kbGet = kbStore.get(doc.knowledgeBaseId);
+                        kbGet.onsuccess = () => {
+                            const kb = kbGet.result;
+                            if (kb) {
+                                kb.documentCount = Math.max(0, (kb.documentCount || 1) - 1);
+                                kbStore.put(kb);
+                            }
+                        };
+                    };
+
+                    transaction.oncomplete = () => resolve();
+                    transaction.onerror = () => reject(transaction.error);
+                });
+            },
+
+            // 文本块 CRUD
+            async addChunks(documentId, chunks) {
+                const db = await this.open();
+                return new Promise((resolve, reject) => {
+                    const transaction = db.transaction(['chunks'], 'readwrite');
+                    const store = transaction.objectStore('chunks');
+                    const now = Date.now();
+
+                    chunks.forEach((content, index) => {
+                        store.add({
+                            documentId,
+                            content,
+                            index,
+                            createdAt: now,
+                        });
+                    });
+
+                    transaction.oncomplete = () => resolve();
+                    transaction.onerror = () => reject(transaction.error);
+                });
+            },
+
+            async getChunksByDocument(documentId) {
+                const db = await this.open();
+                return new Promise((resolve, reject) => {
+                    const transaction = db.transaction(['chunks'], 'readonly');
+                    const store = transaction.objectStore('chunks');
+                    const index = store.index('documentId');
+                    const request = index.getAll(documentId);
+                    request.onsuccess = () => {
+                        const chunks = request.result || [];
+                        chunks.sort((a, b) => a.index - b.index);
+                        resolve(chunks);
+                    };
+                    request.onerror = () => reject(request.error);
+                });
+            },
+
+            async getAllChunks(knowledgeBaseId) {
+                const db = await this.open();
+                return new Promise(async (resolve, reject) => {
+                    // 获取该知识库下所有文档
+                    const docs = await this.getDocumentsByKnowledgeBase(knowledgeBaseId);
+                    const docIds = docs.map(d => d.id);
+
+                    const db2 = await this.open();
+                    const transaction = db2.transaction(['chunks'], 'readonly');
+                    const store = transaction.objectStore('chunks');
+                    const request = store.getAll();
+                    request.onsuccess = () => {
+                        const allChunks = request.result || [];
+                        // 过滤出属于该知识库的文本块
+                        const filtered = allChunks.filter(c => docIds.includes(c.documentId));
+                        resolve(filtered);
+                    };
+                    request.onerror = () => reject(request.error);
+                });
+            },
+        };
+
+        // ========== 文本分块工具 ==========
+        const chunkText = (text, chunkSize = 500, overlap = 50) => {
+            if (!text || text.trim().length === 0) return [];
+
+            const chunks = [];
+            let start = 0;
+            const textLength = text.length;
+
+            while (start < textLength) {
+                let end = start + chunkSize;
+
+                // 尽量在句子边界分割
+                if (end < textLength) {
+                    const periodIndex = text.indexOf('。', end - 50);
+                    const commaIndex = text.indexOf('，', end - 50);
+                    const newlineIndex = text.indexOf('\n', end - 50);
+
+                    const boundaryIndices = [periodIndex, commaIndex, newlineIndex].filter(i => i > end - 150 && i < end + 50);
+                    if (boundaryIndices.length > 0) {
+                        end = Math.min(...boundaryIndices) + 1;
+                    }
+                }
+
+                const chunk = text.slice(start, end).trim();
+                if (chunk.length > 0) {
+                    chunks.push(chunk);
+                }
+
+                start = end - overlap;
+                if (start >= textLength) break;
+            }
+
+            return chunks;
+        };
+
+        // ========== 检索工具（改进的中文关键词检索） ==========
+        const searchChunks = (chunks, query, topK = 5) => {
+            if (!query || chunks.length === 0) return [];
+
+            // 判断是否为中文
+            const isChinese = /[\u4e00-\u9fa5]/.test(query);
+            let queryWords = [];
+
+            if (isChinese) {
+                // 中文：提取所有 2-4 个字符的组合作为关键词
+                const cleanedQuery = query.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '').toLowerCase();
+                // 生成 2-4 字的滑动窗口
+                for (let len = 2; len <= 4; len++) {
+                    for (let i = 0; i <= cleanedQuery.length - len; i++) {
+                        const word = cleanedQuery.slice(i, i + len);
+                        if (word.length === len) {
+                            queryWords.push(word);
+                        }
+                    }
+                }
+            } else {
+                // 英文：使用空格分割
+                queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 1);
+            }
+
+            const queryLower = query.toLowerCase();
+
+            const scoredChunks = chunks.map(chunk => {
+                const contentLower = chunk.content.toLowerCase();
+                let score = 0;
+                let matchCount = 0;
+
+                // 1. 精确匹配整个查询（最高优先级）
+                if (contentLower.includes(queryLower)) {
+                    score += 20;
+                }
+
+                // 2. 关键词匹配
+                queryWords.forEach(word => {
+                    if (contentLower.includes(word)) {
+                        score += 5;
+                        const matches = contentLower.split(word).length - 1;
+                        score += matches * 2;
+                        matchCount++;
+                    }
+                });
+
+                // 3. 短关键词匹配奖励（更灵活）
+                if (isChinese) {
+                    // 中文：检查是否包含查询中的任意字符
+                    const queryChars = query.replace(/[^\u4e00-\u9fa5]/g, '').split('');
+                    const matchedChars = queryChars.filter(c => contentLower.includes(c));
+                    if (matchedChars.length > 0) {
+                        score += matchedChars.length * 0.5;
+                    }
+                }
+
+                // 4. 位置奖励（查询词出现在开头）
+                const firstMatchIndex = contentLower.indexOf(queryWords[0] || queryLower);
+                if (firstMatchIndex !== -1 && firstMatchIndex < 50) {
+                    score += 3;
+                }
+
+                // 5. 长度惩罚（避免过长文本）
+                if (chunk.content.length > 1000) {
+                    score = score * 0.8;
+                }
+
+                return { ...chunk, score, matchCount };
+            });
+
+            // 过滤：至少要有匹配
+            return scoredChunks
+                .filter(c => c.score > 0 || c.matchCount > 0)
+                .sort((a, b) => {
+                    // 优先按匹配数量，再按分数
+                    if (b.matchCount !== a.matchCount) {
+                        return b.matchCount - a.matchCount;
+                    }
+                    return b.score - a.score;
+                })
+                .slice(0, topK);
+        };
+
+        // 构建 RAG Prompt
+        const buildRAGPrompt = (query, retrievedChunks, systemPrompt = '') => {
+            const context = retrievedChunks
+                .map((chunk, i) => `[来源${i + 1}${chunk.sourceName ? ` - ${chunk.sourceName}` : ''}]: ${chunk.content}`)
+                .join('\n\n');
+
+            const ragPrompt = `你是一个基于知识库问答的AI助手。请根据以下参考资料回答用户的问题。
+
+参考资料：
+${context}
+
+用户问题：${query}
+
+请根据参考资料回答，如果参考资料中没有相关信息，请如实说明你无法根据已知信息回答这个问题，并给出合理的建议。`;
+
+            return ragPrompt;
         };
 
         // ========== 历史记录组件 ==========
@@ -1200,6 +1669,222 @@
             );
         };
 
+        // ========== 知识库管理组件 ==========
+        const KnowledgeDrawer = ({ open, onClose, knowledgeBases, onCreateKnowledgeBase, onDeleteKnowledgeBase, onUploadDocument, onDeleteDocument, documents }) => {
+            const [newKbName, setNewKbName] = useState('');
+            const [showCreateForm, setShowCreateForm] = useState(false);
+            const [expandedKb, setExpandedKb] = useState(null);
+            const [uploadingDoc, setUploadingDoc] = useState(null);
+            const { success, error } = useMessage();
+
+            const handleCreate = async () => {
+                if (!newKbName.trim()) return;
+                await onCreateKnowledgeBase({ name: newKbName.trim() });
+                setNewKbName('');
+                setShowCreateForm(false);
+                success('知识库创建成功');
+            };
+
+            const handleUpload = async (kbId, file) => {
+                setUploadingDoc(kbId);
+                try {
+                    await onUploadDocument(kbId, file);
+                    success(`文档 "${file.name}" 上传成功`);
+                } catch (err) {
+                    error(`上传失败: ${err.message}`);
+                }
+                setUploadingDoc(null);
+            };
+
+            if (!open) return null;
+
+            return (
+                <>
+                    <div className="fixed inset-0 bg-black/50 z-40" onClick={onClose} />
+                    <div className="fixed right-0 top-0 bottom-0 w-96 bg-white dark:bg-[#18181b] z-50 border-l border-gray-200 dark:border-[#27272a] flex flex-col transform transition-transform duration-300">
+                        {/* 头部 */}
+                        <div className="p-4 border-b border-gray-200 dark:border-[#27272a] flex items-center justify-between">
+                            <h2 className="text-lg font-semibold text-gray-900 dark:text-white">知识库管理</h2>
+                            <button onClick={onClose} className="p-1 hover:bg-gray-100 dark:hover:bg-[#3f3f46] rounded transition-colors">
+                                <X size={20} className="text-gray-500 dark:text-zinc-400" />
+                            </button>
+                        </div>
+
+                        {/* 新建知识库 */}
+                        <div className="p-4 border-b border-gray-200 dark:border-[#27272a]">
+                            {showCreateForm ? (
+                                <div className="space-y-2">
+                                    <input
+                                        type="text"
+                                        value={newKbName}
+                                        onChange={(e) => setNewKbName(e.target.value)}
+                                        placeholder="输入知识库名称..."
+                                        className="w-full px-3 py-2 bg-gray-100 dark:bg-[#1f1f23] border border-gray-300 dark:border-[#27272a] rounded-lg text-sm text-gray-900 dark:text-white focus:outline-none focus:border-violet-500"
+                                        onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
+                                        autoFocus
+                                    />
+                                    <div className="flex gap-2">
+                                        <button
+                                            onClick={handleCreate}
+                                            className="flex-1 px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-lg text-sm transition-colors"
+                                        >
+                                            创建
+                                        </button>
+                                        <button
+                                            onClick={() => { setShowCreateForm(false); setNewKbName(''); }}
+                                            className="flex-1 px-3 py-1.5 bg-gray-100 dark:bg-[#1f1f23] text-gray-700 dark:text-gray-300 rounded-lg text-sm transition-colors"
+                                        >
+                                            取消
+                                        </button>
+                                    </div>
+                                </div>
+                            ) : (
+                                <button
+                                    onClick={() => setShowCreateForm(true)}
+                                    className="w-full px-3 py-2 bg-violet-600 hover:bg-violet-500 text-white rounded-lg text-sm flex items-center justify-center gap-2 transition-colors"
+                                >
+                                    <Plus size={16} />
+                                    新建知识库
+                                </button>
+                            )}
+                        </div>
+
+                        {/* 知识库列表 */}
+                        <div className="flex-1 overflow-y-auto custom-scrollbar p-4">
+                            {knowledgeBases.length === 0 ? (
+                                <div className="text-center text-gray-500 dark:text-zinc-500 py-8 text-sm">
+                                    暂无知识库，请创建一个
+                                </div>
+                            ) : (
+                                <div className="space-y-3">
+                                    {knowledgeBases.map(kb => (
+                                        <div
+                                            key={kb.id}
+                                            className={`bg-gray-50 dark:bg-[#1f1f23] rounded-lg border transition-colors ${
+                                                'border-gray-200 dark:border-[#27272a]'
+                                            }`}
+                                        >
+                                            {/* 知识库标题 */}
+                                            <div className="p-3 flex items-center justify-between">
+                                                <button
+                                                    onClick={() => {
+                                                        setExpandedKb(expandedKb === kb.id ? null : kb.id);
+                                                    }}
+                                                    className="flex items-center gap-2 flex-1 text-left"
+                                                >
+                                                    <BookOpen size={16} className="text-violet-400" />
+                                                    <div className="flex-1 min-w-0">
+                                                        <div className="text-sm font-medium text-gray-900 dark:text-white truncate">
+                                                            {kb.name}
+                                                        </div>
+                                                        <div className="text-xs text-gray-500 dark:text-zinc-500">
+                                                            {kb.documentCount || 0} 个文档
+                                                        </div>
+                                                    </div>
+                                                </button>
+                                                <div className="flex items-center gap-1">
+                                                    <button
+                                                        onClick={() => onDeleteKnowledgeBase(kb.id)}
+                                                        className="p-1.5 hover:bg-red-50 dark:hover:bg-red-600/20 rounded transition-colors"
+                                                        title="删除知识库"
+                                                    >
+                                                        <Trash2 size={14} className="text-gray-400 dark:text-zinc-400 hover:text-red-400" />
+                                                    </button>
+                                                </div>
+                                            </div>
+
+                                            {/* 文档列表（展开时显示） */}
+                                            {expandedKb === kb.id && (
+                                                <div className="px-3 pb-3 border-t border-gray-200 dark:border-[#27272a] pt-3 space-y-2">
+                                                    {/* 上传文档 */}
+                                                    <label className="block">
+                                                        <input
+                                                            type="file"
+                                                            accept=".txt,.md,.text"
+                                                            className="hidden"
+                                                            onChange={(e) => {
+                                                                const file = e.target.files?.[0];
+                                                                if (file) handleUpload(kb.id, file);
+                                                            }}
+                                                            disabled={uploadingDoc === kb.id}
+                                                        />
+                                                        <div className={`px-3 py-2 rounded-lg text-sm text-center cursor-pointer transition-colors ${
+                                                            uploadingDoc === kb.id
+                                                                ? 'bg-gray-200 dark:bg-[#27272a] text-gray-400'
+                                                                : 'bg-violet-600/10 text-violet-600 hover:bg-violet-600/20'
+                                                        }`}>
+                                                            {uploadingDoc === kb.id ? (
+                                                                <span className="flex items-center justify-center gap-2">
+                                                                    <Loader2 size={14} className="animate-spin" />
+                                                                    处理中...
+                                                                </span>
+                                                            ) : (
+                                                                <span className="flex items-center justify-center gap-2">
+                                                                    <Upload size={14} />
+                                                                    上传文档
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    </label>
+
+                                                    {/* 文档列表 */}
+                                                    {(documents[kb.id] || []).map(doc => (
+                                                        <div key={doc.id} className="flex items-center justify-between px-2 py-1.5 bg-white dark:bg-[#0a0a0a] rounded text-xs">
+                                                            <div className="flex items-center gap-2 flex-1 min-w-0">
+                                                                <FileText size={12} className="text-gray-400 flex-shrink-0" />
+                                                                <span className="truncate text-gray-700 dark:text-gray-300">{doc.name}</span>
+                                                            </div>
+                                                            <button
+                                                                onClick={() => onDeleteDocument(kb.id, doc.id)}
+                                                                className="p-1 hover:bg-red-50 dark:hover:bg-red-600/20 rounded flex-shrink-0"
+                                                            >
+                                                                <X size={12} className="text-gray-400 hover:text-red-400" />
+                                                            </button>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* 底部提示 */}
+                        <div className="p-4 border-t border-gray-200 dark:border-[#27272a]">
+                            <div className="text-xs text-gray-500 dark:text-zinc-500 text-center">
+                                支持 TXT、MD 格式文档
+                            </div>
+                        </div>
+                    </div>
+                </>
+            );
+        };
+
+        // ========== 知识库选择器组件 ==========
+        const KnowledgeSelect = ({ knowledgeBases, selectedId, onChange, disabled }) => {
+            const selectedKb = knowledgeBases.find(kb => kb.id === selectedId);
+
+            return (
+                <div className="flex items-center gap-2">
+                    <BookOpen size={16} className="text-violet-400" />
+                    <select
+                        value={selectedId || ''}
+                        onChange={(e) => onChange(e.target.value ? parseInt(e.target.value) : null)}
+                        disabled={disabled}
+                        className="bg-gray-100 dark:bg-[#1f1f23] border border-gray-300 dark:border-[#27272a] rounded-lg px-3 py-1.5 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-violet-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        <option value="">不使用知识库</option>
+                        {knowledgeBases.map(kb => (
+                            <option key={kb.id} value={kb.id}>
+                                {kb.name} ({kb.documentCount || 0} 文档)
+                            </option>
+                        ))}
+                    </select>
+                </div>
+            );
+        };
+
         // 删除模型缓存（从 Cache API 和 IndexedDB）
         async function deleteModelCache(modelId) {
             console.log('[模型] 开始删除模型:', modelId);
@@ -1382,10 +2067,18 @@
             const [currentConversationId, setCurrentConversationId] = useState(null);
             const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
             const [modelManagerOpen, setModelManagerOpen] = useState(false);
+            const [knowledgeDrawerOpen, setKnowledgeDrawerOpen] = useState(false);
             const [cachedModels, setCachedModels] = useState([]);
             const [theme, setTheme] = useState(() => localStorage.getItem('pudding_theme') || 'dark');
             const [themeAnimating, setThemeAnimating] = useState(false);
             const [themeAnimationOrigin, setThemeAnimationOrigin] = useState({ x: 0, y: 0, scaleSize: 50 });
+
+            // 知识库相关状态
+            const [knowledgeBases, setKnowledgeBases] = useState([]);
+            const [knowledgeEnabled, setKnowledgeEnabled] = useState(false);
+            const [knowledgeDocuments, setKnowledgeDocuments] = useState({});
+            const [retrievedChunks, setRetrievedChunks] = useState([]);
+
             const inputRef = useRef(null);
             const abortRef = useRef(null);
             const engineRef = useRef(null); // 用于避免闭包问题
@@ -1701,6 +2394,154 @@
                 }
             };
 
+            // ========== 知识库相关函数 ==========
+            // 加载知识库列表
+            const loadKnowledgeBases = async () => {
+                try {
+                    const kbs = await KnowledgeDB.getAllKnowledgeBases();
+                    setKnowledgeBases(kbs);
+                } catch (err) {
+                    console.error('[知识库] 加载失败:', err);
+                }
+            };
+
+            // 创建知识库
+            const handleCreateKnowledgeBase = async (data) => {
+                try {
+                    await KnowledgeDB.createKnowledgeBase(data);
+                    await loadKnowledgeBases();
+                } catch (err) {
+                    console.error('[知识库] 创建失败:', err);
+                }
+            };
+
+            // 删除知识库
+            const handleDeleteKnowledgeBase = async (kbId) => {
+                const confirmed = await showConfirm({
+                    title: '删除知识库',
+                    content: '确定要删除这个知识库吗？所有文档将被永久删除。',
+                    confirmText: '删除',
+                    cancelText: '取消',
+                    type: 'danger'
+                });
+                if (!confirmed) return;
+                try {
+                    await KnowledgeDB.deleteKnowledgeBase(kbId);
+                    if (selectedKnowledgeBaseId === kbId) {
+                        setSelectedKnowledgeBaseId(null);
+                        setRetrievedChunks([]);
+                    }
+                    await loadKnowledgeBases();
+                    success('知识库已删除');
+                } catch (err) {
+                    console.error('[知识库] 删除失败:', err);
+                    error(`删除失败: ${err.message}`);
+                }
+            };
+
+            // 上传文档（关键词检索）
+            const handleUploadDocument = async (kbId, file, onProgress) => {
+                const fileType = file.name.split('.').pop()?.toLowerCase();
+                if (!['txt', 'md', 'text'].includes(fileType)) {
+                    throw new Error('仅支持 TXT、MD 格式文件');
+                }
+
+                info('正在读取文件...');
+
+                // 读取文件内容
+                const content = await new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => resolve(e.target.result);
+                    reader.onerror = reject;
+                    reader.readAsText(file);
+                });
+
+                if (!content || content.trim().length === 0) {
+                    throw new Error('文件内容为空');
+                }
+
+                // 文本分块
+                const chunks = chunkText(content, 500, 50);
+                info(`文本已分成 ${chunks.length} 个片段`);
+
+                // 添加文档记录
+                const doc = await KnowledgeDB.addDocument({
+                    knowledgeBaseId: kbId,
+                    name: file.name,
+                    type: fileType,
+                    content: content,
+                    chunkCount: chunks.length,
+                    status: 'completed'
+                });
+
+                // 添加文本块
+                await KnowledgeDB.addChunks(doc.id, chunks);
+
+                success(`文档上传完成，已分成 ${chunks.length} 个片段`);
+
+                // 刷新知识库数据
+                await loadKnowledgeBases();
+                const docs = await KnowledgeDB.getDocumentsByKnowledgeBase(kbId);
+                setKnowledgeDocuments(prev => ({ ...prev, [kbId]: docs }));
+            };
+
+            // 删除文档
+            const handleDeleteDocument = async (kbId, docId) => {
+                const confirmed = await showConfirm({
+                    title: '删除文档',
+                    content: '确定要删除这个文档吗？',
+                    confirmText: '删除',
+                    cancelText: '取消',
+                    type: 'danger'
+                });
+                if (!confirmed) return;
+                try {
+                    await KnowledgeDB.deleteDocument(docId);
+                    await loadKnowledgeBases();
+                    const docs = await KnowledgeDB.getDocumentsByKnowledgeBase(kbId);
+                    setKnowledgeDocuments(prev => ({ ...prev, [kbId]: docs }));
+                    success('文档已删除');
+                } catch (err) {
+                    console.error('[知识库] 删除文档失败:', err);
+                    error(`删除失败: ${err.message}`);
+                }
+            };
+
+            // 知识库问答检索（检索所有知识库）
+            const retrieveFromKnowledgeBase = async (query) => {
+                if (!knowledgeEnabled || !query.trim()) {
+                    return [];
+                }
+
+                try {
+                    // 获取所有知识库的文本块
+                    let allChunks = [];
+                    for (const kb of knowledgeBases) {
+                        const chunks = await KnowledgeDB.getAllChunks(kb.id);
+                        // 为每个块添加来源信息
+                        const chunksWithSource = chunks.map(chunk => ({
+                            ...chunk,
+                            sourceName: kb.name
+                        }));
+                        allChunks = allChunks.concat(chunksWithSource);
+                    }
+
+                    if (allChunks.length === 0) return [];
+
+                    // 关键词检索
+                    const results = searchChunks(allChunks, query, 5);
+                    return results;
+                } catch (err) {
+                    console.error('[知识库] 检索失败:', err);
+                    return [];
+                }
+            };
+
+            // 页面加载时加载知识库列表
+            useEffect(() => {
+                loadKnowledgeBases();
+            }, []);
+
             // 页面加载时检查已缓存的模型
             useEffect(() => {
                 getCachedModelsWithInfo().then(models => {
@@ -2001,12 +2842,16 @@
                 setMessages(prev => [...prev, userMsg]);
                 setInput('');
                 setIsGenerating(true);
+                setRetrievedChunks([]); // 清空上次的检索结果
 
                 // 自动聚焦输入框
                 setTimeout(() => inputRef.current?.focus(), 100);
 
+                // 用于存储当前检索结果
+                let currentRetrievedChunks = [];
+
                 try {
-                    setMessages(prev => [...prev, { role: 'assistant', content: '', timestamp: Date.now() }]);
+                    setMessages(prev => [...prev, { role: 'assistant', content: '', timestamp: Date.now(), retrievedChunks: [] }]);
 
                     // 创建 AbortController 用于中断
                     abortRef.current = new AbortController();
@@ -2020,14 +2865,29 @@
                         allMessages.push({ role: 'system', content: roleInfo.systemPrompt });
                     }
 
-                    // 2. 添加历史消息（排除最后一条空消息，限制最近 10 轮对话以避免 token 超出限制）
+                    // 2. 如果启用了知识库，进行检索
+                    let ragPrompt = userMsg.content;
+                    if (knowledgeEnabled) {
+                        info('正在检索知识库...');
+                        const chunks = await retrieveFromKnowledgeBase(userMsg.content);
+                        currentRetrievedChunks = chunks;
+                        setRetrievedChunks(chunks);
+                        if (chunks.length > 0) {
+                            ragPrompt = buildRAGPrompt(userMsg.content, chunks);
+                            success(`已检索到 ${chunks.length} 条相关内容`);
+                        } else {
+                            info('知识库中未找到相关内容');
+                        }
+                    }
+
+                    // 3. 添加历史消息（排除最后一条空消息，限制最近 10 轮对话以避免 token 超出限制）
                     const historyMessages = messages.slice(0, -1).slice(-20);
                     historyMessages.forEach(msg => {
                         allMessages.push({ role: msg.role, content: msg.content });
                     });
 
-                    // 3. 添加当前用户消息
-                    allMessages.push({ role: 'user', content: userMsg.content });
+                    // 4. 添加当前用户消息（使用 RAG Prompt 或原始消息）
+                    allMessages.push({ role: 'user', content: ragPrompt });
 
                     const stream = await engine.chat.completions.create({
                         messages: allMessages,
@@ -2042,7 +2902,7 @@
                             setMessages(prev => {
                                 const last = prev[prev.length - 1];
                                 if (last.role === 'assistant') {
-                                    return [...prev.slice(0, -1), { role: 'assistant', content: fullResponse + ' (...已中断)', timestamp: last.timestamp }];
+                                    return [...prev.slice(0, -1), { role: 'assistant', content: fullResponse + ' (...已中断)', timestamp: last.timestamp, retrievedChunks: currentRetrievedChunks }];
                                 }
                                 return prev;
                             });
@@ -2053,7 +2913,7 @@
                         setMessages(prev => {
                             const last = prev[prev.length - 1];
                             if (last.role === 'assistant') {
-                                return [...prev.slice(0, -1), { role: 'assistant', content: fullResponse, timestamp: last.timestamp }];
+                                return [...prev.slice(0, -1), { role: 'assistant', content: fullResponse, timestamp: last.timestamp, retrievedChunks: currentRetrievedChunks }];
                             }
                             return prev;
                         });
@@ -2064,7 +2924,7 @@
                         console.log('生成已中断');
                     } else {
                         console.error('生成错误:', err);
-                        setMessages(prev => [...prev, { role: 'assistant', content: `错误: ${err.message}`, timestamp: Date.now() }]);
+                        setMessages(prev => [...prev, { role: 'assistant', content: `错误: ${err.message}`, timestamp: Date.now(), retrievedChunks: [] }]);
                     }
                 }
 
@@ -2161,6 +3021,16 @@
                         onDeleteModel={handleDeleteModel}
                         onClearAll={handleClearAllCache}
                     />
+                    <KnowledgeDrawer
+                        open={knowledgeDrawerOpen}
+                        onClose={() => setKnowledgeDrawerOpen(false)}
+                        knowledgeBases={knowledgeBases}
+                        onCreateKnowledgeBase={handleCreateKnowledgeBase}
+                        onDeleteKnowledgeBase={handleDeleteKnowledgeBase}
+                        onUploadDocument={handleUploadDocument}
+                        onDeleteDocument={handleDeleteDocument}
+                        documents={knowledgeDocuments}
+                    />
                     <div className="h-screen w-screen bg-white dark:bg-[#0a0a0a] text-gray-900 dark:text-white flex overflow-hidden transition-colors duration-300">
                         {/* 左侧导航栏 */}
                         <div className="w-16 bg-white dark:bg-[#0a0a0a] border-r border-gray-200 dark:border-[#27272a] flex flex-col items-center py-4 gap-4 transition-colors duration-300">
@@ -2184,6 +3054,14 @@
                                 title="模型管理"
                             >
                                 <Settings size={20} className="text-gray-500 dark:text-zinc-400 group-hover:text-gray-900 dark:group-hover:text-white" />
+                            </button>
+
+                            <button
+                                onClick={() => setKnowledgeDrawerOpen(true)}
+                                className="p-2.5 hover:bg-gray-200 dark:hover:bg-[#27272a] rounded-xl transition-colors group relative"
+                                title="知识库管理"
+                            >
+                                <BookOpen size={20} className="text-gray-500 dark:text-zinc-400 group-hover:text-gray-900 dark:group-hover:text-white" />
                             </button>
 
                             <div className="flex-1"></div>
@@ -2235,6 +3113,23 @@
                                     )}
                                 </div>
                                 <RoleSelect value={roleId} onChange={setRoleId} engine={engine} />
+                                {/* 知识库开关 */}
+                                <button
+                                    onClick={() => setKnowledgeEnabled(!knowledgeEnabled)}
+                                    disabled={!engine || isGenerating || knowledgeBases.length === 0}
+                                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm transition-colors ${
+                                        knowledgeEnabled
+                                            ? 'bg-violet-600 border-violet-500 text-white'
+                                            : 'bg-gray-100 dark:bg-[#1f1f23] border-gray-300 dark:border-[#27272a] text-gray-700 dark:text-gray-300'
+                                    } disabled:opacity-50 disabled:cursor-not-allowed`}
+                                    title={knowledgeBases.length === 0 ? '请先创建知识库' : (knowledgeEnabled ? '知识库已启用' : '启用知识库')}
+                                >
+                                    <BookOpen size={14} />
+                                    <span>知识库 {knowledgeEnabled ? '开' : '关'}</span>
+                                    {knowledgeBases.length > 0 && (
+                                        <span className="text-xs opacity-75">({knowledgeBases.length})</span>
+                                    )}
+                                </button>
                                 <select
                                     value={modelId}
                                     onChange={handleModelChange}
@@ -2300,6 +3195,7 @@
                                             </div>
                                         ) : '')}
                                         timestamp={msg.timestamp}
+                                        retrievedChunks={msg.retrievedChunks || []}
                                     />
                                 ))
                             )}
