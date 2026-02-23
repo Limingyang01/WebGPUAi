@@ -394,8 +394,10 @@
 
         // 消息气泡组件
         const MessageBubble = ({ role, content, timestamp, retrievedChunks }) => {
-            // 确保 content 是字符串
-            const safeContent = typeof content === 'string' ? content : String(content || '');
+            // 检查 content 是否为 React 元素（JSX）
+            const isReactElement = content && typeof content === 'object' && content.$$typeof;
+            // 确保 content 是字符串，如果不是 React 元素则转换
+            const safeContent = isReactElement ? '' : (typeof content === 'string' ? content : String(content || ''));
             const [copied, setCopied] = useState(false);
             const [thinkExpanded, setThinkExpanded] = useState(false);
             const [referencesExpanded, setReferencesExpanded] = useState(false);
@@ -465,14 +467,14 @@
                             ? 'bg-gradient-to-br from-violet-600 to-indigo-600 text-white rounded-tr-sm'
                             : 'bg-gray-100 dark:bg-[#27272a] text-gray-800 dark:text-zinc-200 rounded-tl-sm'
                             }`}>
-                            {isUser ? safeContent : (
+                            {isUser ? safeContent : isReactElement ? content : (
                                 hasThink ? <span dangerouslySetInnerHTML={{ __html: parseMarkdown(main) }} /> : <span dangerouslySetInnerHTML={{ __html: parseMarkdown(safeContent) }} />
                             )}
                         </div>
                         {/* 时间和复制按钮（仅AI消息） */}
                         <div className="flex items-center gap-3 mt-1 text-xs text-gray-400 dark:text-zinc-500">
                             <span>{timestamp ? formatTime(timestamp) : ''}</span>
-                            {isAssistant && (
+                            {isAssistant && !isReactElement && (
                                 <button
                                     onClick={handleCopy}
                                     className="flex items-center gap-1 hover:text-gray-600 dark:hover:text-zinc-300 transition-colors"
@@ -482,7 +484,7 @@
                             )}
                         </div>
                         {/* 引用来源显示 */}
-                        {isAssistant && retrievedChunks && retrievedChunks.length > 0 && (
+                        {isAssistant && !isReactElement && retrievedChunks && retrievedChunks.length > 0 && (
                             <div className="mt-2">
                                 <button
                                     onClick={() => setReferencesExpanded(!referencesExpanded)}
@@ -2075,9 +2077,14 @@ ${context}
 
             // 知识库相关状态
             const [knowledgeBases, setKnowledgeBases] = useState([]);
-            const [knowledgeEnabled, setKnowledgeEnabled] = useState(false);
+            const [knowledgeEnabled, setKnowledgeEnabled] = useState(() => localStorage.getItem('pudding_knowledge_enabled') === 'true');
             const [knowledgeDocuments, setKnowledgeDocuments] = useState({});
             const [retrievedChunks, setRetrievedChunks] = useState([]);
+
+            // 知识库开关状态持久化
+            useEffect(() => {
+                localStorage.setItem('pudding_knowledge_enabled', knowledgeEnabled);
+            }, [knowledgeEnabled]);
 
             const inputRef = useRef(null);
             const abortRef = useRef(null);
@@ -3113,23 +3120,24 @@ ${context}
                                     )}
                                 </div>
                                 <RoleSelect value={roleId} onChange={setRoleId} engine={engine} />
-                                {/* 知识库开关 */}
-                                <button
-                                    onClick={() => setKnowledgeEnabled(!knowledgeEnabled)}
-                                    disabled={!engine || isGenerating || knowledgeBases.length === 0}
-                                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm transition-colors ${
-                                        knowledgeEnabled
-                                            ? 'bg-violet-600 border-violet-500 text-white'
-                                            : 'bg-gray-100 dark:bg-[#1f1f23] border-gray-300 dark:border-[#27272a] text-gray-700 dark:text-gray-300'
-                                    } disabled:opacity-50 disabled:cursor-not-allowed`}
-                                    title={knowledgeBases.length === 0 ? '请先创建知识库' : (knowledgeEnabled ? '知识库已启用' : '启用知识库')}
-                                >
-                                    <BookOpen size={14} />
-                                    <span>知识库 {knowledgeEnabled ? '开' : '关'}</span>
-                                    {knowledgeBases.length > 0 && (
-                                        <span className="text-xs opacity-75">({knowledgeBases.length})</span>
-                                    )}
-                                </button>
+                                {/* 知识库开关（滑块样式） */}
+                                <div className="flex items-center gap-2">
+                                    <BookOpen size={14} className={knowledgeEnabled ? 'text-violet-400' : 'text-gray-400'} />
+                                    <button
+                                        onClick={() => setKnowledgeEnabled(!knowledgeEnabled)}
+                                        disabled={!engine || isGenerating || knowledgeBases.length === 0}
+                                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                                            knowledgeEnabled ? 'bg-violet-600' : 'bg-gray-300 dark:bg-[#27272a]'
+                                        } disabled:opacity-50 disabled:cursor-not-allowed`}
+                                        title={knowledgeBases.length === 0 ? '请先创建知识库' : (knowledgeEnabled ? '禁用知识库' : '启用知识库')}
+                                    >
+                                        <span
+                                            className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                                knowledgeEnabled ? 'translate-x-6' : 'translate-x-1'
+                                            }`}
+                                        />
+                                    </button>
+                                </div>
                                 <select
                                     value={modelId}
                                     onChange={handleModelChange}
