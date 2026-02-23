@@ -756,6 +756,28 @@
                 return `<pre class="bg-[#1a1a1a] rounded-lg p-3 my-2 overflow-x-auto text-xs font-mono border border-zinc-700"><code>${code.trim()}</code></pre>`;
             });
 
+            // 第一步：先处理 HTML 实体转义（将 &lt; 转换为 < 等），以便后续正则能匹配
+            html = html.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+
+            // 处理 AI 直接输出的原始 <pre><code> 标签（保留样式，不转义）
+            // 匹配 <pre ...><code>...</code></pre> 格式，支持任意属性
+            html = html.replace(/<pre[^>]*><code>([\s\S]*?)<\/code><\/pre>/gi, (match, code) => {
+                return `<pre class="bg-[#1a1a1a] rounded-lg p-3 my-2 overflow-x-auto text-xs font-mono border border-zinc-700"><code>${code.trim()}</code></pre>`;
+            });
+
+            // 处理 <pre><code>...</code></pre> 无属性版本
+            html = html.replace(/<pre><code>([\s\S]*?)<\/code><\/pre>/gi, (match, code) => {
+                return `<pre class="bg-[#1a1a1a] rounded-lg p-3 my-2 overflow-x-auto text-xs font-mono border border-zinc-700"><code>${code.trim()}</code></pre>`;
+            });
+
+            // 处理原始 <pre>...</pre> 标签（无 code 包装）
+            html = html.replace(/<pre[^>]*>([\s\S]*?)<\/pre>/gi, (match, code) => {
+                return `<pre class="bg-[#1a1a1a] rounded-lg p-3 my-2 overflow-x-auto text-xs font-mono border border-zinc-700"><code>${code.trim()}</code></pre>`;
+            });
+
+            // 处理原始 <code> 标签（行内）- 贪婪匹配
+            html = html.replace(/<code>([\s\S]*?)<\/code>/gi, '<code class="bg-[#1a1a1a] px-1.5 py-0.5 rounded text-xs font-mono text-pink-400">$1</code>');
+
             // 转义 HTML 特殊字符（在代码块处理之后）
             html = html
                 .replace(/&/g, '&amp;')
