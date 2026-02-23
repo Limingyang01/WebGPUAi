@@ -2063,6 +2063,8 @@ ${context}
             const [status, setStatus] = useState('未加载');
             const [modelId, setModelId] = useState('');
             const [modelName, setModelName] = useState('');
+            const [modelReady, setModelReady] = useState(() => localStorage.getItem('pudding_model_ready') === 'true');
+            const [silentLoading, setSilentLoading] = useState(false);
             const [roleId, setRoleId] = useState('default');
             const [isGenerating, setIsGenerating] = useState(false);
             const [conversations, setConversations] = useState([]);
@@ -2144,9 +2146,16 @@ ${context}
             // 初始化时设置上次使用的模型（由 useEffect 自动加载）
             useEffect(() => {
                 const cached = localStorage.getItem('webllm_last_model');
+                const wasReady = localStorage.getItem('pudding_model_ready') === 'true';
+
                 if (cached) {
                     const model = MODEL_LIST.find(m => m.id === cached);
                     if (model) {
+                        // 如果之前模型已加载完成，先显示就绪状态（跳过加载动画）
+                        if (wasReady) {
+                            setStatus('已就绪');
+                            setModelReady(true);
+                        }
                         setModelId(cached);
                         setModelName(model.name);
                         // modelId 变化时会触发下面的 useEffect 自动加载
@@ -2753,12 +2762,24 @@ ${context}
                 // 如果已经在加载目标模型，跳过
                 if (loading && modelId === targetModelId) return;
 
+                // 检查是否之前已加载完成（跳过加载动画）
+                const wasModelReady = localStorage.getItem('pudding_model_ready') === 'true';
+                const isSameModel = localStorage.getItem('webllm_last_model') === targetModelId;
+
+                // 如果之前已加载且是同一模型，静默加载（不显示加载动画）
+                const silentLoad = wasModelReady && isSameModel;
+
                 // 开始加载新模型
-                setLoading(true);
-                setModelLoading(true);
-                setProgress(0);
-                setStatus('加载中');
-                setProgressText('检查环境...');
+                if (!silentLoad) {
+                    setLoading(true);
+                    setModelLoading(true);
+                    setProgress(0);
+                    setStatus('加载中');
+                    setProgressText('检查环境...');
+                } else {
+                    // 静默加载时显示轻量级 loading
+                    setSilentLoading(true);
+                }
 
                 // 保存目标模型ID，用于在加载完成后验证
                 const targetId = targetModelId;
@@ -2774,7 +2795,9 @@ ${context}
                         setMessages([]);
                     }
 
-                    setProgressText('正在加载模型...');
+                    if (!silentLoad) {
+                        setProgressText('正在加载模型...');
+                    }
 
                     // 动态加载 webllm 模块
                     const webllmModule = await getWebLLM();
@@ -2808,8 +2831,12 @@ ${context}
                         setEngine(mlcEngine);
                         engineRef.current = mlcEngine; // 同步到 ref
                         setStatus('已就绪');
-                        setLoading(false);
-                        setModelLoading(false);
+
+                        // 只有在非静默加载时才设置 loading 状态
+                        if (!silentLoad) {
+                            setLoading(false);
+                            setModelLoading(false);
+                        }
 
                         // 刷新缓存模型列表（带详细信息）
                         getCachedModelsWithInfo().then(models => setCachedModels(models));
@@ -2817,27 +2844,52 @@ ${context}
                         // 保存模型选择
                         localStorage.setItem('webllm_last_model', targetId);
 
-                        // 添加欢迎消息（开始新对话）
-                        setCurrentConversationId(null);
-                        const modelInfo = MODEL_LIST.find(m => m.id === targetId);
-                        const roleInfo = ROLE_LIST.find(r => r.id === roleId);
-                        const rolePrefix = roleId === 'default' ? '' : `【${roleInfo?.name || ''}】`;
-                        setMessages([{
-                            role: 'assistant',
-                            content: `${rolePrefix}你好！我是运行在浏览器里的本地 AI 模型 (${modelInfo?.name || targetId})。\n有什么可以帮你的吗？`,
-                            timestamp: Date.now()
-                        }]);
+                        // 标记模型已就绪（刷新页面时跳过加载动画）
+                        setModelReady(true);
+                        localStorage.setItem('pudding_model_ready', 'true');
 
-                        success(`模型 "${modelInfo?.name || targetId}" 已加载`);
+                        // 关闭静默加载状态
+                        setSilentLoading(false);
+
+                        // 只有在非静默加载时才显示欢迎消息和提示
+                        if (!silentLoad) {
+                            // 添加欢迎消息（开始新对话）
+                            setCurrentConversationId(null);
+                            const modelInfo = MODEL_LIST.find(m => m.id === targetId);
+                            const roleInfo = ROLE_LIST.find(r => r.id === roleId);
+                            const rolePrefix = roleId === 'default' ? '' : `【${roleInfo?.name || ''}】`;
+                            setMessages([{
+                                role: 'assistant',
+                                content: `${rolePrefix}你好！我是运行在浏览器里的本地 AI 模型 (${modelInfo?.name || targetId})。\n有什么可以帮你的吗？`,
+                                timestamp: Date.now()
+                            }]);
+
+                            success(`模型 "${modelInfo?.name || targetId}" 已加载`);
+                        }
                     }
                 } catch (err) {
                     console.error('加载错误:', err);
-                    setLoading(false);
-                    setModelLoading(false);
+
+                    // 只有在非静默加载时才设置 loading 状态
+                    if (!silentLoad) {
+                        setLoading(false);
+                        setModelLoading(false);
+                    }
+
+                    // 关闭静默加载状态
+                    setSilentLoading(false);
+
                     setStatus('错误');
+                    // 加载失败时重置就绪状态，下次需要显示加载动画
+                    setModelReady(false);
+                    localStorage.removeItem('pudding_model_ready');
                     const errorMsg = err.message || '加载失败';
                     setProgressText(errorMsg);
-                    error(`加载失败: ${errorMsg}`);
+
+                    // 只有在非静默加载时才显示错误提示
+                    if (!silentLoad) {
+                        error(`加载失败: ${errorMsg}`);
+                    }
                 }
             };
 
@@ -3182,7 +3234,26 @@ ${context}
 
                         {/* 聊天区域 */}
                         <div className="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-6 bg-white dark:bg-[#0a0a0a] transition-colors duration-300">
-                            {messages.length === 0 ? (
+                            {silentLoading ? (
+                                <div className="flex flex-col items-center justify-center h-full min-h-[400px]">
+                                    <div className="relative">
+                                        {/* 脉冲动画圆环 */}
+                                        <div className="w-20 h-20 rounded-full border-4 border-violet-200 dark:border-violet-800"></div>
+                                        <div className="absolute top-0 left-0 w-20 h-20 rounded-full border-4 border-violet-500 border-t-transparent animate-spin"></div>
+                                        {/* 中间 Logo */}
+                                        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-12 h-12 rounded-xl overflow-hidden shadow-lg shadow-rose-500/30 border-2 border-rose-500/50">
+                                            <img src="Ming.jpg" alt="Ming" className="w-full h-full object-cover" />
+                                        </div>
+                                    </div>
+                                    <p className="mt-6 text-lg font-medium text-gray-700 dark:text-zinc-300">正在初始化模型</p>
+                                    <p className="mt-2 text-sm text-gray-500 dark:text-zinc-500">请稍候，马上就好...</p>
+                                    <div className="mt-4 flex gap-1">
+                                        <span className="w-2 h-2 bg-violet-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></span>
+                                        <span className="w-2 h-2 bg-violet-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
+                                        <span className="w-2 h-2 bg-violet-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
+                                    </div>
+                                </div>
+                            ) : messages.length === 0 ? (
                                 <div className="text-center text-gray-500 dark:text-zinc-500 py-20">
                                     <div className="w-16 h-16 mx-auto mb-4 rounded-2xl overflow-hidden shadow-lg shadow-rose-500/30 border-2 border-rose-500/50">
                                         <img src="Ming.jpg" alt="Ming" className="w-full h-full object-cover" />
