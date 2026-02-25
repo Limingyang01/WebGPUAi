@@ -1414,6 +1414,283 @@
             },
         };
 
+        // ========== Web Worker for Knowledge Base Search (减少主线程阻塞) ==========
+        // 使用 Blob URL 创建内联 Worker
+        const createSearchWorker = () => {
+            const workerCode = `
+                // 计算余弦相似度
+                function cosineSimilarity(vec1, vec2) {
+                    if (!vec1 || !vec2 || vec1.length !== vec2.length) return 0;
+                    let dotProduct = 0;
+                    let norm1 = 0;
+                    let norm2 = 0;
+                    for (let i = 0; i < vec1.length; i++) {
+                        dotProduct += vec1[i] * vec2[i];
+                        norm1 += vec1[i] * vec1[i];
+                        norm2 += vec2[i] * vec2[i];
+                    }
+                    const denominator = Math.sqrt(norm1) * Math.sqrt(norm2);
+                    return denominator === 0 ? 0 : dotProduct / denominator;
+                }
+
+                // 关键词检索（在 Worker 中执行）- 简化版，仅做精确匹配补充
+                function searchChunksWorker(chunks, query, topK) {
+                    if (!query || chunks.length === 0) return [];
+
+                    const queryLower = query.toLowerCase();
+
+                    const scoredChunks = chunks.map(chunk => {
+                        const contentLower = chunk.content.toLowerCase();
+                        let score = 0;
+                        let matchCount = 0;
+
+                        // 1. 精确匹配整个查询（最高优先级）
+                        if (contentLower.includes(queryLower)) {
+                            score += 30;
+                            matchCount += 3;
+                        }
+
+                        // 2. 关键词匹配（2-4字滑动窗口）
+                        const isChinese = /[\\u4e00-\\u9fa5]/.test(query);
+                        if (isChinese) {
+                            const cleanedQuery = query.replace(/[^\\u4e00-\\u9fa5a-zA-Z0-9]/g, '').toLowerCase();
+                            for (let len = 2; len <= 4; len++) {
+                                for (let i = 0; i <= cleanedQuery.length - len; i++) {
+                                    const word = cleanedQuery.slice(i, i + len);
+                                    if (word.length === len && contentLower.includes(word)) {
+                                        score += 5;
+                                        matchCount++;
+                                    }
+                                }
+                            }
+                        } else {
+                            const words = queryLower.split(/\\s+/).filter(w => w.length > 1);
+                            words.forEach(word => {
+                                if (contentLower.includes(word)) {
+                                    score += 5;
+                                    matchCount++;
+                                }
+                            });
+                        }
+
+                        // 3. 位置奖励
+                        const firstMatchIndex = contentLower.indexOf(queryLower);
+                        if (firstMatchIndex !== -1 && firstMatchIndex < 50) {
+                            score += 3;
+                        }
+
+                        return { ...chunk, score, matchCount };
+                    });
+
+                    return scoredChunks
+                        .filter(c => c.score > 0)
+                        .sort((a, b) => {
+                            if (b.matchCount !== a.matchCount) return b.matchCount - a.matchCount;
+                            return b.score - a.score;
+                        })
+                        .slice(0, topK);
+                }
+
+                // 语义检索（在 Worker 中执行）- 核心检索方式
+                function semanticSearchWorker(chunks, queryEmbedding, topK) {
+                    if (!chunks || chunks.length === 0 || !queryEmbedding) return [];
+
+                    const scoredChunks = chunks.map(chunk => {
+                        let similarity = 0;
+                        if (chunk.embedding && chunk.embedding.length > 0) {
+                            similarity = cosineSimilarity(queryEmbedding, chunk.embedding);
+                        }
+                        return { ...chunk, score: similarity, similarity: similarity };
+                    });
+
+                    return scoredChunks
+                        .filter(c => c.score > 0)
+                        .sort((a, b) => b.score - a.score)
+                        .slice(0, topK);
+                }
+
+                // 文本分块（在 Worker 中执行）
+                function chunkTextWorker(text, chunkSize = 500, overlap = 100) {
+                    if (!text || text.trim().length === 0) return [];
+
+                    const paragraphs = [];
+                    const doubleNewlineParts = text.split(/\\n\\n+/);
+
+                    let currentPart = '';
+                    doubleNewlineParts.forEach(part => {
+                        part = part.trim();
+                        if (!part) return;
+                        if ((currentPart + '\\n\\n' + part).length <= chunkSize) {
+                            currentPart = currentPart ? currentPart + '\\n\\n' + part : part;
+                        } else {
+                            if (currentPart) paragraphs.push(currentPart);
+                            if (part.length > chunkSize) {
+                                const lines = part.split('\\n');
+                                let lineGroup = '';
+                                lines.forEach(line => {
+                                    line = line.trim();
+                                    if (!line) return;
+                                    if ((lineGroup + '\\n' + line).length <= chunkSize) {
+                                        lineGroup = lineGroup ? lineGroup + '\\n' + line : line;
+                                    } else {
+                                        if (lineGroup) paragraphs.push(lineGroup);
+                                        lineGroup = line;
+                                    }
+                                });
+                                if (lineGroup) paragraphs.push(lineGroup);
+                            } else {
+                                currentPart = part;
+                            }
+                        }
+                    });
+                    if (currentPart) paragraphs.push(currentPart);
+
+                    const finalChunks = [];
+                    let tempChunk = '';
+                    paragraphs.forEach(para => {
+                        if (para.length <= chunkSize) {
+                            if (tempChunk && (tempChunk + '\\n\\n' + para).length <= chunkSize) {
+                                tempChunk = tempChunk + '\\n\\n' + para;
+                            } else {
+                                if (tempChunk) finalChunks.push(tempChunk);
+                                tempChunk = para;
+                            }
+                        } else {
+                            const lines = para.split('\\n');
+                            let lineChunk = '';
+                            lines.forEach(line => {
+                                line = line.trim();
+                                if (!line) return;
+                                if ((lineChunk + '\\n' + line).length <= chunkSize) {
+                                    lineChunk = lineChunk ? lineChunk + '\\n' + line : line;
+                                } else {
+                                    if (lineChunk) finalChunks.push(lineChunk);
+                                    if (line.length > chunkSize) {
+                                        const words = line.split(' ');
+                                        let wordChunk = '';
+                                        words.forEach(word => {
+                                            if ((wordChunk + ' ' + word).length <= chunkSize) {
+                                                wordChunk = wordChunk ? wordChunk + ' ' + word : word;
+                                            } else {
+                                                if (wordChunk) finalChunks.push(wordChunk);
+                                                wordChunk = word;
+                                            }
+                                        });
+                                        if (wordChunk) lineChunk = wordChunk;
+                                    } else {
+                                        lineChunk = line;
+                                    }
+                                }
+                            });
+                            if (lineChunk) {
+                                if (tempChunk && (tempChunk + '\\n\\n' + lineChunk).length <= chunkSize) {
+                                    tempChunk = tempChunk + '\\n\\n' + lineChunk;
+                                } else {
+                                    if (tempChunk) finalChunks.push(tempChunk);
+                                    tempChunk = lineChunk;
+                                }
+                            }
+                        }
+                    });
+                    if (tempChunk) finalChunks.push(tempChunk);
+
+                    const result = [];
+                    for (let i = 0; i < finalChunks.length; i++) {
+                        if (result.length === 0) {
+                            result.push(finalChunks[i]);
+                        } else {
+                            const prevChunk = result[result.length - 1];
+                            if (prevChunk.length > overlap) {
+                                const overlapText = prevChunk.slice(-overlap);
+                                const newChunk = overlapText + finalChunks[i];
+                                if (newChunk.length <= chunkSize + overlap) {
+                                    result.push(newChunk);
+                                } else {
+                                    result.push(finalChunks[i]);
+                                }
+                            } else {
+                                result.push(finalChunks[i]);
+                            }
+                        }
+                    }
+                    return result.filter(c => c.trim().length > 0);
+                }
+
+                // 消息处理
+                self.onmessage = function(e) {
+                    const { type, data, id } = e.data;
+                    let result, error;
+
+                    try {
+                        switch (type) {
+                            case 'keywordSearch':
+                                result = searchChunksWorker(data.chunks, data.query, data.topK);
+                                break;
+                            case 'semanticSearch':
+                                result = semanticSearchWorker(data.chunks, data.queryEmbedding, data.topK);
+                                break;
+                            case 'chunkText':
+                                result = chunkTextWorker(data.text, data.chunkSize, data.overlap);
+                                break;
+                            default:
+                                error = 'Unknown message type: ' + type;
+                        }
+                    } catch (err) {
+                        error = err.message;
+                    }
+
+                    self.postMessage({ id, type, result, error });
+                };
+            `;
+
+            const blob = new Blob([workerCode], { type: 'application/javascript' });
+            return new Worker(URL.createObjectURL(blob));
+        };
+
+        // 创建 Worker 实例
+        let searchWorker = null;
+        let workerRequestId = 0;
+        const workerCallbacks = new Map();
+
+        // 初始化 Worker
+        const initSearchWorker = () => {
+            if (searchWorker) return searchWorker;
+            searchWorker = createSearchWorker();
+            searchWorker.onmessage = (e) => {
+                const { id, type, result, error } = e.data;
+                const callback = workerCallbacks.get(id);
+                if (callback) {
+                    if (error) {
+                        callback.reject(new Error(error));
+                    } else {
+                        callback.resolve(result);
+                    }
+                    workerCallbacks.delete(id);
+                }
+            };
+            return searchWorker;
+        };
+
+        // 封装 Worker 调用为 Promise
+        const callWorker = (type, data) => {
+            return new Promise((resolve, reject) => {
+                const worker = initSearchWorker();
+                const id = ++workerRequestId;
+                workerCallbacks.set(id, { resolve, reject });
+                worker.postMessage({ type, data, id });
+            });
+        };
+
+        // 便捷方法（自动处理 Promise）
+        const workerKeywordSearch = (chunks, query, topK) =>
+            callWorker('keywordSearch', { chunks, query, topK });
+
+        const workerSemanticSearch = (chunks, queryEmbedding, topK) =>
+            callWorker('semanticSearch', { chunks, queryEmbedding, topK });
+
+        const workerChunkText = (text, chunkSize, overlap) =>
+            callWorker('chunkText', { text, chunkSize, overlap });
+
         // ========== Transformers.js 语义检索模块 ==========
         const SemanticSearch = {
             // Embedding 模型（中文优化）
@@ -1689,131 +1966,60 @@
             return result.filter(c => c.trim().length > 0);
         };
 
-        // ========== 检索工具（改进的中文关键词检索） ==========
-        // 中文同义词映射表（可扩展）
-        const CHINESE_SYNONYMS = {
-            '抵抗': ['免疫', '体质', '健康', '身体'],
-            '免疫': ['抵抗', '体质', '抗体'],
-            '感冒': ['发烧', '发热', '流感', '咳嗽'],
-            '发烧': ['发热', '感冒', '体温'],
-            '血压': ['高压', '低压', '舒张压', '收缩压'],
-            '血糖': ['糖尿病', '血糖高', '血糖低'],
-            '心脏': ['心血管', '冠心病', '心肌'],
-            '眼睛': ['视力', '眼部', '视网膜'],
-            '睡眠': ['失眠', '睡觉', '休息'],
-            '减肥': ['瘦身', '体重', '肥胖', '健身'],
-            '增强': ['提高', '改善', '加强'],
-            '怎么办': ['如何', '怎么处理', '怎么解决'],
-        };
-
+        // ========== 检索工具（简化版关键词检索） ==========
+        // 关键词检索仅作为语义检索的精确匹配补充，同义词由向量模型处理
         const searchChunks = (chunks, query, topK = 5) => {
             if (!query || chunks.length === 0) return [];
 
-            // 判断是否为中文
-            const isChinese = /[\u4e00-\u9fa5]/.test(query);
-            let queryWords = [];
-            let extraSynonymWords = [];
-
-            if (isChinese) {
-                // 中文：提取所有 2-4 个字符的组合作为关键词
-                const cleanedQuery = query.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '').toLowerCase();
-
-                // 添加同义词
-                Object.keys(CHINESE_SYNONYMS).forEach(key => {
-                    if (cleanedQuery.includes(key)) {
-                        extraSynonymWords.push(...CHINESE_SYNONYMS[key]);
-                    }
-                });
-
-                // 生成 2-4 字的滑动窗口
-                for (let len = 2; len <= 4; len++) {
-                    for (let i = 0; i <= cleanedQuery.length - len; i++) {
-                        const word = cleanedQuery.slice(i, i + len);
-                        if (word.length === len) {
-                            queryWords.push(word);
-                        }
-                    }
-                }
-            } else {
-                // 英文：使用空格分割
-                queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 1);
-            }
-
-            // 合并原始关键词和同义词
-            const allQueryWords = [...queryWords, ...extraSynonymWords];
             const queryLower = query.toLowerCase();
 
             const scoredChunks = chunks.map(chunk => {
                 const contentLower = chunk.content.toLowerCase();
                 let score = 0;
                 let matchCount = 0;
-                let synonymMatchCount = 0;
 
                 // 1. 精确匹配整个查询（最高优先级）
                 if (contentLower.includes(queryLower)) {
-                    score += 25;
-                    matchCount += 2;
+                    score += 30;
+                    matchCount += 3;
                 }
 
-                // 2. 关键词匹配（原始查询词）
-                queryWords.forEach(word => {
-                    if (contentLower.includes(word)) {
-                        score += 8;
-                        const matches = contentLower.split(word).length - 1;
-                        score += matches * 3;
-                        matchCount++;
-                    }
-                });
-
-                // 3. 同义词匹配（较低权重）
-                extraSynonymWords.forEach(word => {
-                    if (contentLower.includes(word)) {
-                        score += 5;
-                        synonymMatchCount++;
-                    }
-                });
-
-                // 4. 短关键词匹配奖励（更灵活）
+                // 2. 关键词匹配（2-4字滑动窗口）
+                const isChinese = /[\u4e00-\u9fa5]/.test(query);
                 if (isChinese) {
-                    // 中文：检查是否包含查询中的任意字符
-                    const queryChars = query.replace(/[^\u4e00-\u9fa5]/g, '').split('');
-                    const matchedChars = queryChars.filter(c => contentLower.includes(c));
-                    if (matchedChars.length > 0) {
-                        // 字符匹配率
-                        const matchRate = matchedChars.length / queryChars.length;
-                        if (matchRate >= 0.5) {
-                            score += matchedChars.length * 1;
+                    const cleanedQuery = query.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '').toLowerCase();
+                    for (let len = 2; len <= 4; len++) {
+                        for (let i = 0; i <= cleanedQuery.length - len; i++) {
+                            const word = cleanedQuery.slice(i, i + len);
+                            if (word.length === len && contentLower.includes(word)) {
+                                score += 5;
+                                matchCount++;
+                            }
                         }
                     }
+                } else {
+                    const words = queryLower.split(/\s+/).filter(w => w.length > 1);
+                    words.forEach(word => {
+                        if (contentLower.includes(word)) {
+                            score += 5;
+                            matchCount++;
+                        }
+                    });
                 }
 
-                // 5. 位置奖励（查询词出现在开头）
-                const firstMatchIndex = contentLower.indexOf(queryWords[0] || queryLower);
+                // 3. 位置奖励
+                const firstMatchIndex = contentLower.indexOf(queryLower);
                 if (firstMatchIndex !== -1 && firstMatchIndex < 50) {
-                    score += 5;
+                    score += 3;
                 }
 
-                // 6. 内容长度适中奖励（300-800字最佳）
-                const contentLen = chunk.content.length;
-                if (contentLen >= 300 && contentLen <= 800) {
-                    score *= 1.1;
-                } else if (contentLen > 1500) {
-                    score *= 0.7;
-                }
-
-                return { ...chunk, score, matchCount, synonymMatchCount };
+                return { ...chunk, score, matchCount };
             });
 
-            // 过滤：至少要有匹配（同义词也算）
             return scoredChunks
-                .filter(c => c.score > 0 || c.matchCount > 0 || c.synonymMatchCount > 0)
+                .filter(c => c.score > 0)
                 .sort((a, b) => {
-                    // 优先按匹配数量（原始+同义词），再按分数
-                    const aTotalMatch = a.matchCount + a.synonymMatchCount;
-                    const bTotalMatch = b.matchCount + b.synonymMatchCount;
-                    if (bTotalMatch !== aTotalMatch) {
-                        return bTotalMatch - aTotalMatch;
-                    }
+                    if (b.matchCount !== a.matchCount) return b.matchCount - a.matchCount;
                     return b.score - a.score;
                 })
                 .slice(0, topK);
@@ -1828,16 +2034,18 @@
 
             let requirement = '';
             if (hasResults) {
-                requirement = `你是一个严谨的 AI 知识库助手。根据以下参考资料准确回答问题。
+                requirement = `你必须严格根据以下提供的参考资料来回答用户问题，禁止使用任何未在参考资料中提及的信息。
 
-【参考资料】
+【参考资料】（这些是你唯一可以依赖的信息）
 ${context}
 
 【用户问题】
 ${query}
 
 【回答要求】
-根据上述参考资料，直接给出答案，不要说"根据资料"、"抱歉"之类的话。`;
+1. 只使用上述参考资料中的信息回答
+2. 如果参考资料中有相关信息，直接引用并回答
+3. 禁止说"根据资料"、"抱歉"、"我不确定"等话`;
             } else {
                 requirement = `知识库中没有找到相关信息。请回复"暂时未检索出相关答复，我仍在学习中"。`;
             }
@@ -2925,8 +3133,8 @@ ${query}
                     throw new Error('文件内容为空');
                 }
 
-                // 文本分块
-                const chunks = chunkText(content, 500, 50);
+                // 文本分块（使用 Web Worker，不阻塞主线程）
+                const chunks = await workerChunkText(content, 500, 50);
                 info(`文本已分成 ${chunks.length} 个片段`);
 
                 // 添加文档记录
@@ -3059,7 +3267,7 @@ ${historyContext}
                 }
             };
 
-            // 知识库问答检索（关键词与语义融合）
+            // 知识库问答检索（语义为主，关键词为补充）- 使用 Web Worker 优化
             const retrieveFromKnowledgeBase = async (query, historyMessages = []) => {
                 if (!knowledgeEnabled || !query.trim()) {
                     return [];
@@ -3072,7 +3280,7 @@ ${historyContext}
                     searchQuery = await rewriteQuery(query, historyMessages);
                 }
 
-                const MIN_SIMILARITY_THRESHOLD = 0.25; // 语义检索阈值 25%（放宽阈值提升召回）
+                const MIN_SIMILARITY_THRESHOLD = 0.45; // 语义检索阈值 45%（平衡召回与精确）
                 const MAX_RESULTS = 8; // 最多返回结果数
 
                 try {
@@ -3089,62 +3297,61 @@ ${historyContext}
 
                     if (allChunks.length === 0) return [];
 
-                    // 2. 关键词检索（不设阈值，只要有关键词匹配就返回）
-                    const keywordResults = searchChunks(allChunks, query, MAX_RESULTS);
-                    console.log('[知识库] 关键词检索结果数:', keywordResults.length, '最高分:', keywordResults[0]?.score?.toFixed(2) || 0);
-
-                    // 3. 同时进行语义检索
+                    // 2. 语义检索优先（依靠向量模型处理同义词、语义相似）
                     let semanticResults = [];
                     let hasEmbeddings = false;
                     let allChunksWithEmbedding = allChunks.filter(c => c.embedding && c.embedding.length > 0);
+
                     if (allChunksWithEmbedding.length > 0) {
                         hasEmbeddings = true;
                         try {
-                            // 使用原始 query 进行语义检索，保留更多语义信息
-                            semanticResults = await SemanticSearch.semanticSearch(allChunksWithEmbedding, query, MAX_RESULTS);
+                            // 先在主线程计算 query embedding（需要 WebGPU）
+                            const queryEmbedding = await SemanticSearch.getEmbedding(query);
+                            // 然后在 Worker 中计算相似度
+                            semanticResults = await workerSemanticSearch(allChunksWithEmbedding, queryEmbedding, MAX_RESULTS);
                             if (semanticResults.length > 0) {
                                 const maxSim = semanticResults[0].similarity || semanticResults[0].score || 0;
                                 console.log('[知识库] 语义检索结果数:', semanticResults.length, '最高相似度:', maxSim.toFixed(2));
+
+                                // 如果语义相似度足够高，直接返回
+                                if (maxSim >= MIN_SIMILARITY_THRESHOLD) {
+                                    console.log('[知识库] 使用语义检索结果');
+                                    return semanticResults;
+                                }
                             }
                         } catch (err) {
                             console.warn('[知识库] 语义检索失败:', err);
                         }
                     }
 
-                    // 4. 融合策略：关键词优先，语义补充
-                    // 如果关键词结果分数 >= 1，直接使用关键词结果
-                    if (keywordResults.length > 0 && (keywordResults[0].score || 0) >= 1) {
-                        console.log('[知识库] 使用关键词检索结果');
+                    // 3. 关键词检索作为精确匹配补充
+                    const keywordResults = await workerKeywordSearch(allChunks, query, MAX_RESULTS);
+                    console.log('[知识库] 关键词检索结果数:', keywordResults.length, '最高分:', keywordResults[0]?.score?.toFixed(2) || 0);
+
+                    // 4. 如果关键词有精确匹配（分数 >= 15），优先使用
+                    if (keywordResults.length > 0 && (keywordResults[0].score || 0) >= 15) {
+                        console.log('[知识库] 使用关键词精确匹配结果');
                         return keywordResults;
                     }
 
-                    // 如果有语义结果且相似度 >= 阈值，使用语义结果
-                    if (semanticResults.length > 0) {
-                        const maxSim = semanticResults[0].similarity || semanticResults[0].score || 0;
-                        if (maxSim >= MIN_SIMILARITY_THRESHOLD) {
-                            console.log('[知识库] 使用语义检索结果');
-                            return semanticResults;
-                        }
-                    }
-
-                    // 5. 如果两者都有结果但都不够好，尝试合并排序
-                    if (keywordResults.length > 0 && semanticResults.length > 0) {
-                        // 归一化分数后合并
-                        const maxKeywordScore = keywordResults[0].score || 1;
+                    // 5. 如果语义检索有结果但不够好，融合两者
+                    if (semanticResults.length > 0 && keywordResults.length > 0) {
                         const maxSemanticScore = semanticResults[0].similarity || semanticResults[0].score || 0;
+                        const maxKeywordScore = keywordResults[0].score || 0;
+
+                        // 语义权重 70%，关键词权重 30%
+                        const normalizedSemantic = semanticResults.map(r => ({
+                            ...r,
+                            combinedScore: (maxSemanticScore) * 0.7
+                        }));
 
                         const normalizedKeyword = keywordResults.map(r => ({
                             ...r,
-                            combinedScore: (r.score / maxKeywordScore) * 0.6 // 关键词权重 60%
-                        }));
-
-                        const normalizedSemantic = semanticResults.map(r => ({
-                            ...r,
-                            combinedScore: (maxSemanticScore / maxSemanticScore) * 0.4 // 语义权重 40%
+                            combinedScore: (r.score / 50) * 0.3 // 归一化到 0-1
                         }));
 
                         // 合并并去重
-                        const combined = [...normalizedKeyword, ...normalizedSemantic];
+                        const combined = [...normalizedSemantic, ...normalizedKeyword];
                         const seen = new Set();
                         const unique = combined.filter(r => {
                             const key = r.content.slice(0, 50);
@@ -3158,12 +3365,24 @@ ${historyContext}
                             .slice(0, MAX_RESULTS);
 
                         if (finalResults.length > 0) {
-                            console.log('[知识库] 使用关键词+语义融合结果');
+                            console.log('[知识库] 使用语义+关键词融合结果');
                             return finalResults;
                         }
                     }
 
-                    // 6. 都无结果返回空（但有内容时给提示）
+                    // 6. 如果只有语义结果，返回语义结果
+                    if (semanticResults.length > 0) {
+                        console.log('[知识库] 使用语义检索结果（阈值以下但无可用关键词）');
+                        return semanticResults;
+                    }
+
+                    // 7. 如果只有关键词结果，返回关键词结果
+                    if (keywordResults.length > 0) {
+                        console.log('[知识库] 使用关键词检索结果（无可用语义）');
+                        return keywordResults;
+                    }
+
+                    // 8. 都无结果
                     if (allChunks.length > 0 && !hasEmbeddings) {
                         console.log('[知识库] 知识库有内容但未计算向量，请先计算 Embedding');
                     } else {
@@ -3572,8 +3791,8 @@ ${historyContext}
                     const roleInfo = ROLE_LIST.find(r => r.id === roleId);
                     const allMessages = [];
 
-                    // 1. 添加系统提示词（如果有）
-                    if (roleId !== 'default' && roleInfo?.systemPrompt) {
+                    // 1. 添加系统提示词（如果有）- 启用知识库时跳过角色提示，避免冲突
+                    if (!knowledgeEnabled && roleId !== 'default' && roleInfo?.systemPrompt) {
                         allMessages.push({ role: 'system', content: roleInfo.systemPrompt });
                     }
 
@@ -3605,13 +3824,14 @@ ${historyContext}
                     // 4. 添加当前用户消息（使用 RAG Prompt 或原始消息）
                     allMessages.push({ role: 'user', content: ragPrompt });
 
+                    let fullResponse = '';
+
                     const stream = await engine.chat.completions.create({
                         messages: allMessages,
                         stream: true,
                         signal: abortRef.current.signal,
                     });
 
-                    let fullResponse = '';
                     for await (const chunk of stream) {
                         if (abortRef.current?.signal.aborted) {
                             // 用户中断，追加提示

@@ -89,6 +89,8 @@ WebGPUAi/
 | 引用来源展示 | ✅ 已完成 | 显示 AI 回复的参考来源（折叠展开） |
 | 检索增强 | ✅ 已完成 | 将检索内容注入 Prompt |
 | 语义模型下载 | ✅ 已完成 | 手动下载语义向量模型 |
+| 查询重写 | ✅ 已完成 | 基于对话历史的智能查询优化 |
+| Web Worker 优化 | ✅ 已完成 | 检索计算移至后台线程，减少主线程卡顿 |
 
 ---
 
@@ -134,21 +136,37 @@ WebGPUAi/
 
 ### 5.1 检索算法
 
-**语义检索优先** - 基于 Transformers.js 实现
+**关键词与语义融合检索** - 基于 Transformers.js + Web Worker
 
-1. **优先语义检索**：使用向量相似度计算
-   - 模型：paraphrase-multilingual-MiniLM-L12-v2
-   - 算法：余弦相似度
-   - 返回 top 5 结果
+1. **查询重写**：结合对话历史，将指代性问题重写为独立检索词
+   - 智能判断：只有包含指代词（它/这个/那个）或省略表达时才重写
+   - 保留核心意图和关键词
 
-2. **关键词备用**：语义检索无结果时自动回退
-   - 精确匹配整个查询：+20 分
-   - 关键词匹配：+5 分/词
-   - 关键词出现次数：+2 分/次
-   - 位置奖励（前50字）：+3 分
-   - 长度惩罚：>1000字 衰减 20%
+2. **语义检索优先**（核心检索方式）：
+   - 模型：Xenova/bge-small-zh-v1.5（中文优化，向量模型自动处理同义词/语义相似）
+   - 相似度阈值：35%（平衡召回与精确，避免无关内容干扰）
+   - 余弦相似度计算
+   - 权重：70%
 
-### 5.2 Embedding 计算优化
+3. **关键词检索补充**（仅做精确匹配）：
+   - 2-4 字滑动窗口关键词提取
+   - 评分：精确匹配 +30、关键词 +5/词、位置奖励
+   - 仅当关键词精确匹配分数 >= 15 时优先使用
+   - 权重：30%
+
+4. **融合策略**：
+   - 语义相似度 >= 20% → 直接使用语义结果
+   - 关键词精确匹配分数 >= 15 → 优先使用关键词
+   - 否则归一化后合并（语义 70% + 关键词 30%）
+
+### 5.2 Web Worker 优化
+
+- **内联 Worker**：使用 Blob URL 创建，无需额外文件
+- **Worker 任务**：关键词检索、语义相似度计算、文本分块
+- **主线程任务**：UI 渲染、WebGPU 推理、Embedding 计算
+- **消息传递**：Promise 封装，支持 async/await 调用
+
+### 5.3 Embedding 计算优化
 
 - **并行批量计算**：每批 4 个文本同时计算
 - **IndexedDB 存储**：向量数据持久化存储
@@ -162,7 +180,7 @@ WebGPUAi/
 | 模型缓存 | IndexedDB `webllm-cache` | `model-cache` |
 | 知识库 | IndexedDB `pudding-knowledge-db` | `knowledgeBases`, `documents`, `chunks` |
 | 用户偏好 | localStorage | `pudding_settings`, `pudding_theme`, `pudding_knowledge_enabled` 等 |
-| 语义模型状态 | localStorage | `pudding_embedding_model_loaded` |
+| 语义模型状态 | localStorage | `pudding_embedding_model_loaded`, `pudding_embedding_model_version` |
 
 ### 5.4 主题初始化
 
@@ -179,7 +197,6 @@ WebGPUAi/
 | 功能 | 优先级 | 说明 |
 |------|--------|------|
 | PDF 支持 | P1 | 集成 PDF.js 解析 PDF 文档 |
-| 同义词扩展 | P1 | 维护同义词词典提升检索效果 |
 | 检索配置 | P1 | 可配置返回结果数量、相似度阈值 |
 
 ### 6.2 长期 (P2)
@@ -218,6 +235,7 @@ WebGPUAi/
 | v1.2 | 2024-xx-xx | 添加主题切换、思考模式 |
 | v1.3 | 2024-xx-xx | 添加模型状态保持、首屏优化 |
 | v1.4 | 2025-xx-xx | 添加语义检索（Transformers.js）、清空全部历史 |
+| v1.5 | 2025-02-25 | 添加查询重写、Web Worker 性能优化、语义检索优先策略 |
 
 ---
 
