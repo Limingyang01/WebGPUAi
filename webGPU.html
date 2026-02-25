@@ -1690,16 +1690,41 @@
         };
 
         // ========== 检索工具（改进的中文关键词检索） ==========
+        // 中文同义词映射表（可扩展）
+        const CHINESE_SYNONYMS = {
+            '抵抗': ['免疫', '体质', '健康', '身体'],
+            '免疫': ['抵抗', '体质', '抗体'],
+            '感冒': ['发烧', '发热', '流感', '咳嗽'],
+            '发烧': ['发热', '感冒', '体温'],
+            '血压': ['高压', '低压', '舒张压', '收缩压'],
+            '血糖': ['糖尿病', '血糖高', '血糖低'],
+            '心脏': ['心血管', '冠心病', '心肌'],
+            '眼睛': ['视力', '眼部', '视网膜'],
+            '睡眠': ['失眠', '睡觉', '休息'],
+            '减肥': ['瘦身', '体重', '肥胖', '健身'],
+            '增强': ['提高', '改善', '加强'],
+            '怎么办': ['如何', '怎么处理', '怎么解决'],
+        };
+
         const searchChunks = (chunks, query, topK = 5) => {
             if (!query || chunks.length === 0) return [];
 
             // 判断是否为中文
             const isChinese = /[\u4e00-\u9fa5]/.test(query);
             let queryWords = [];
+            let extraSynonymWords = [];
 
             if (isChinese) {
                 // 中文：提取所有 2-4 个字符的组合作为关键词
                 const cleanedQuery = query.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '').toLowerCase();
+
+                // 添加同义词
+                Object.keys(CHINESE_SYNONYMS).forEach(key => {
+                    if (cleanedQuery.includes(key)) {
+                        extraSynonymWords.push(...CHINESE_SYNONYMS[key]);
+                    }
+                });
+
                 // 生成 2-4 字的滑动窗口
                 for (let len = 2; len <= 4; len++) {
                     for (let i = 0; i <= cleanedQuery.length - len; i++) {
@@ -1714,59 +1739,80 @@
                 queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 1);
             }
 
+            // 合并原始关键词和同义词
+            const allQueryWords = [...queryWords, ...extraSynonymWords];
             const queryLower = query.toLowerCase();
 
             const scoredChunks = chunks.map(chunk => {
                 const contentLower = chunk.content.toLowerCase();
                 let score = 0;
                 let matchCount = 0;
+                let synonymMatchCount = 0;
 
                 // 1. 精确匹配整个查询（最高优先级）
                 if (contentLower.includes(queryLower)) {
-                    score += 20;
+                    score += 25;
+                    matchCount += 2;
                 }
 
-                // 2. 关键词匹配
+                // 2. 关键词匹配（原始查询词）
                 queryWords.forEach(word => {
                     if (contentLower.includes(word)) {
-                        score += 5;
+                        score += 8;
                         const matches = contentLower.split(word).length - 1;
-                        score += matches * 2;
+                        score += matches * 3;
                         matchCount++;
                     }
                 });
 
-                // 3. 短关键词匹配奖励（更灵活）
+                // 3. 同义词匹配（较低权重）
+                extraSynonymWords.forEach(word => {
+                    if (contentLower.includes(word)) {
+                        score += 5;
+                        synonymMatchCount++;
+                    }
+                });
+
+                // 4. 短关键词匹配奖励（更灵活）
                 if (isChinese) {
                     // 中文：检查是否包含查询中的任意字符
                     const queryChars = query.replace(/[^\u4e00-\u9fa5]/g, '').split('');
                     const matchedChars = queryChars.filter(c => contentLower.includes(c));
                     if (matchedChars.length > 0) {
-                        score += matchedChars.length * 0.5;
+                        // 字符匹配率
+                        const matchRate = matchedChars.length / queryChars.length;
+                        if (matchRate >= 0.5) {
+                            score += matchedChars.length * 1;
+                        }
                     }
                 }
 
-                // 4. 位置奖励（查询词出现在开头）
+                // 5. 位置奖励（查询词出现在开头）
                 const firstMatchIndex = contentLower.indexOf(queryWords[0] || queryLower);
                 if (firstMatchIndex !== -1 && firstMatchIndex < 50) {
-                    score += 3;
+                    score += 5;
                 }
 
-                // 5. 长度惩罚（避免过长文本）
-                if (chunk.content.length > 1000) {
-                    score = score * 0.8;
+                // 6. 内容长度适中奖励（300-800字最佳）
+                const contentLen = chunk.content.length;
+                if (contentLen >= 300 && contentLen <= 800) {
+                    score *= 1.1;
+                } else if (contentLen > 1500) {
+                    score *= 0.7;
                 }
 
-                return { ...chunk, score, matchCount };
+                return { ...chunk, score, matchCount, synonymMatchCount };
             });
 
-            // 过滤：至少要有匹配
+            // 过滤：至少要有匹配（同义词也算）
             return scoredChunks
-                .filter(c => c.score > 0 || c.matchCount > 0)
+                .filter(c => c.score > 0 || c.matchCount > 0 || c.synonymMatchCount > 0)
                 .sort((a, b) => {
-                    // 优先按匹配数量，再按分数
-                    if (b.matchCount !== a.matchCount) {
-                        return b.matchCount - a.matchCount;
+                    // 优先按匹配数量（原始+同义词），再按分数
+                    const aTotalMatch = a.matchCount + a.synonymMatchCount;
+                    const bTotalMatch = b.matchCount + b.synonymMatchCount;
+                    if (bTotalMatch !== aTotalMatch) {
+                        return bTotalMatch - aTotalMatch;
                     }
                     return b.score - a.score;
                 })
@@ -2965,10 +3011,18 @@ ${query}
                     return query; // 没有历史记录，直接返回原问题
                 }
 
-                // 提取最近几轮的用户问题
+                // 检查是否需要重写（只有包含指代词或省略时才需要）
+                const needsRewrite = /^(它|他|她|这个|那个|这些|那些|刚才|之前|那|这)/.test(query) ||
+                    /^(怎么|如何|为什么|是不是|有没有)/.test(query);
+
+                if (!needsRewrite) {
+                    return query; // 不需要重写，直接返回原问题
+                }
+
+                // 提取最近几轮的用户问题（最多2轮）
                 const recentUserQueries = historyMessages
                     .filter(m => m.role === 'user')
-                    .slice(-3) // 取最近3轮
+                    .slice(-2)
                     .map(m => m.content);
 
                 if (recentUserQueries.length === 0) {
@@ -2976,7 +3030,8 @@ ${query}
                 }
 
                 const historyContext = recentUserQueries.join('\n');
-                const rewritePrompt = `请将以下对话历史和当前问题重写为一个独立的检索词。
+                // 改进的提示词：保留更多原始信息
+                const rewritePrompt = `根据对话历史，将当前问题改写为一个完整、独立的检索词。
 
 对话历史：
 ${historyContext}
@@ -2984,9 +3039,9 @@ ${historyContext}
 当前问题：${query}
 
 要求：
-1. 输出一个简短的检索词（不超过20个字）
-2. 只输出检索词，不要其他解释
-3. 检索词要包含关键信息，能准确表达用户意图
+1. 输出一个简洁的检索词（不超过30个字）
+2. 保留问题的核心意图和关键词
+3. 只输出检索词，不要解释
 
 检索词：`;
 
@@ -3004,7 +3059,7 @@ ${historyContext}
                 }
             };
 
-            // 知识库问答检索（关键词优先，语义补充）
+            // 知识库问答检索（关键词与语义融合）
             const retrieveFromKnowledgeBase = async (query, historyMessages = []) => {
                 if (!knowledgeEnabled || !query.trim()) {
                     return [];
@@ -3017,8 +3072,8 @@ ${historyContext}
                     searchQuery = await rewriteQuery(query, historyMessages);
                 }
 
-                const MIN_SIMILARITY_THRESHOLD = 0.3; // 语义检索阈值 30%
-                const MAX_RESULTS = 10; // 最多返回结果数
+                const MIN_SIMILARITY_THRESHOLD = 0.25; // 语义检索阈值 25%（放宽阈值提升召回）
+                const MAX_RESULTS = 8; // 最多返回结果数
 
                 try {
                     // 1. 先获取所有 chunks
@@ -3034,37 +3089,86 @@ ${historyContext}
 
                     if (allChunks.length === 0) return [];
 
-                    // 2. 关键词检索
+                    // 2. 关键词检索（不设阈值，只要有关键词匹配就返回）
                     const keywordResults = searchChunks(allChunks, query, MAX_RESULTS);
-                    console.log('[知识库] 关键词检索结果数:', keywordResults.length);
+                    console.log('[知识库] 关键词检索结果数:', keywordResults.length, '最高分:', keywordResults[0]?.score?.toFixed(2) || 0);
 
-                    // 3. 如果关键词检索有结果，使用关键词结果
-                    if (keywordResults.length > 0 && (keywordResults[0].score || 0) >= 2) {
-                        console.log('[知识库] 使用关键词检索结果');
-                        return keywordResults;
-                    }
-
-                    // 4. 关键词检索无结果或分数太低，使用语义检索作为补充
+                    // 3. 同时进行语义检索
+                    let semanticResults = [];
+                    let hasEmbeddings = false;
                     let allChunksWithEmbedding = allChunks.filter(c => c.embedding && c.embedding.length > 0);
                     if (allChunksWithEmbedding.length > 0) {
+                        hasEmbeddings = true;
                         try {
-                            const semanticResults = await SemanticSearch.semanticSearch(allChunksWithEmbedding, query, MAX_RESULTS);
+                            // 使用原始 query 进行语义检索，保留更多语义信息
+                            semanticResults = await SemanticSearch.semanticSearch(allChunksWithEmbedding, query, MAX_RESULTS);
                             if (semanticResults.length > 0) {
-                                const maxSimilarity = semanticResults[0].similarity || semanticResults[0].score || 0;
-                                console.log('[知识库] 语义检索结果，最高相似度:', maxSimilarity.toFixed(2));
-
-                                if (maxSimilarity >= MIN_SIMILARITY_THRESHOLD) {
-                                    console.log('[知识库] 使用语义检索结果');
-                                    return semanticResults;
-                                }
+                                const maxSim = semanticResults[0].similarity || semanticResults[0].score || 0;
+                                console.log('[知识库] 语义检索结果数:', semanticResults.length, '最高相似度:', maxSim.toFixed(2));
                             }
                         } catch (err) {
                             console.warn('[知识库] 语义检索失败:', err);
                         }
                     }
 
-                    // 5. 都无结果返回空
-                    console.log('[知识库] 检索无结果');
+                    // 4. 融合策略：关键词优先，语义补充
+                    // 如果关键词结果分数 >= 1，直接使用关键词结果
+                    if (keywordResults.length > 0 && (keywordResults[0].score || 0) >= 1) {
+                        console.log('[知识库] 使用关键词检索结果');
+                        return keywordResults;
+                    }
+
+                    // 如果有语义结果且相似度 >= 阈值，使用语义结果
+                    if (semanticResults.length > 0) {
+                        const maxSim = semanticResults[0].similarity || semanticResults[0].score || 0;
+                        if (maxSim >= MIN_SIMILARITY_THRESHOLD) {
+                            console.log('[知识库] 使用语义检索结果');
+                            return semanticResults;
+                        }
+                    }
+
+                    // 5. 如果两者都有结果但都不够好，尝试合并排序
+                    if (keywordResults.length > 0 && semanticResults.length > 0) {
+                        // 归一化分数后合并
+                        const maxKeywordScore = keywordResults[0].score || 1;
+                        const maxSemanticScore = semanticResults[0].similarity || semanticResults[0].score || 0;
+
+                        const normalizedKeyword = keywordResults.map(r => ({
+                            ...r,
+                            combinedScore: (r.score / maxKeywordScore) * 0.6 // 关键词权重 60%
+                        }));
+
+                        const normalizedSemantic = semanticResults.map(r => ({
+                            ...r,
+                            combinedScore: (maxSemanticScore / maxSemanticScore) * 0.4 // 语义权重 40%
+                        }));
+
+                        // 合并并去重
+                        const combined = [...normalizedKeyword, ...normalizedSemantic];
+                        const seen = new Set();
+                        const unique = combined.filter(r => {
+                            const key = r.content.slice(0, 50);
+                            if (seen.has(key)) return false;
+                            seen.add(key);
+                            return true;
+                        });
+
+                        const finalResults = unique
+                            .sort((a, b) => (b.combinedScore || 0) - (a.combinedScore || 0))
+                            .slice(0, MAX_RESULTS);
+
+                        if (finalResults.length > 0) {
+                            console.log('[知识库] 使用关键词+语义融合结果');
+                            return finalResults;
+                        }
+                    }
+
+                    // 6. 都无结果返回空（但有内容时给提示）
+                    if (allChunks.length > 0 && !hasEmbeddings) {
+                        console.log('[知识库] 知识库有内容但未计算向量，请先计算 Embedding');
+                    } else {
+                        console.log('[知识库] 检索无结果');
+                    }
                     return [];
                 } catch (err) {
                     console.error('[知识库] 检索失败:', err);
