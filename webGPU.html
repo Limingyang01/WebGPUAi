@@ -3800,8 +3800,8 @@ ${historyContext}
                     searchQuery = await rewriteQuery(query, historyMessages);
                 }
 
-                const MIN_SIMILARITY_THRESHOLD = 0.45; // 语义检索阈值 45%（平衡召回与精确）
-                const MAX_RESULTS = 8; // 最多返回结果数
+                const MIN_SIMILARITY_THRESHOLD = 0.65; // 语义检索阈值 65%（平衡召回与精确）
+                const MAX_RESULTS = 3; // 最多返回结果数
 
                 try {
                     // 1. 先获取所有 chunks
