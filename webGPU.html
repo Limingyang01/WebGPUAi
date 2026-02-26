@@ -307,6 +307,7 @@
         const Upload = (p) => <IconWrapper name="Upload" size={18} {...p} />;
         const FileText = (p) => <IconWrapper name="FileText" size={18} {...p} />;
         const BookOpen = (p) => <IconWrapper name="BookOpen" size={18} {...p} />;
+        const Plug = (p) => <IconWrapper name="Plug" size={20} {...p} />;
         const Brain = (p) => <IconWrapper name="Brain" size={14} {...p} />;
 
         // ========== UI 组件 ==========
@@ -1082,6 +1083,282 @@
                     request.onsuccess = () => resolve(request.result);
                     request.onerror = () => reject(request.error);
                 });
+            },
+        };
+
+        // ========== MCP 客户端模块 - 支持多服务器 ==========
+        class MCPServer {
+            constructor(config) {
+                this.id = config.id || Date.now().toString();
+                this.name = config.name || 'MCP Server';
+                this.url = config.url;
+                this.type = config.type || 'sse'; // 'sse' or 'streamable_http'
+                this.connected = false;
+                this.connecting = false;
+                this.eventSource = null;
+                this.tools = [];
+                this.pendingRequests = {};
+                this.requestId = 0;
+            }
+
+            // 连接到 MCP 服务器
+            async connect() {
+                if (this.connecting || this.connected) {
+                    console.log(`[MCP ${this.name}] 已在连接中或已连接`);
+                    return;
+                }
+
+                this.connecting = true;
+                console.log(`[MCP ${this.name}] 连接到: ${this.url}`);
+
+                // 测试连接 - 发送 ping 请求
+                try {
+                    const result = await this.testConnection();
+                    this.connected = true;
+                    this.connecting = false;
+                    console.log(`[MCP ${this.name}] 连接成功`);
+                    return { success: true, tools: this.tools };
+                } catch (err) {
+                    this.connecting = false;
+                    console.error(`[MCP ${this.name}] 连接失败:`, err);
+                    throw err;
+                }
+            }
+
+            // 测试连接 - 尝试获取工具列表
+            async testConnection() {
+                try {
+                    // 尝试调用 tools/list 方法
+                    const result = await this.request('tools/list');
+                    this.tools = result.tools || [];
+                    console.log(`[MCP ${this.name}] 可用工具:`, this.tools.map(t => t.name));
+                    return { success: true, tools: this.tools };
+                } catch (err) {
+                    console.error(`[MCP ${this.name}] 测试连接失败:`, err);
+                    throw err;
+                }
+            }
+
+            // 发送 JSON-RPC 请求
+            async request(method, params = {}) {
+                const id = ++this.requestId;
+                const request = {
+                    jsonrpc: '2.0',
+                    id,
+                    method,
+                    params,
+                };
+
+                // 通过 fetch 发送请求
+                const response = await fetch(this.url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(request),
+                });
+
+                if (!response.ok) {
+                    throw new Error(`MCP 请求失败: ${response.status}`);
+                }
+
+                // 处理流式响应
+                const contentType = response.headers.get('content-type');
+                if (contentType && contentType.includes('text/event-stream')) {
+                    // SSE 响应 - 需要处理流
+                    return await this.handleSSEResponse(response);
+                }
+
+                const data = await response.json();
+                if (data.error) {
+                    throw new Error(data.error.message || 'MCP 请求失败');
+                }
+                return data.result;
+            }
+
+            // 处理 SSE 响应
+            async handleSSEResponse(response) {
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let result = null;
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const data = JSON.parse(line.slice(6));
+                                if (data.result) {
+                                    result = data.result;
+                                }
+                            } catch (e) {
+                                // 忽略解析错误
+                            }
+                        }
+                    }
+                }
+
+                return result;
+            }
+
+            // 获取可用工具列表
+            async listTools() {
+                try {
+                    const result = await this.request('tools/list');
+                    this.tools = result.tools || [];
+                    console.log(`[MCP ${this.name}] 可用工具:`, this.tools.map(t => t.name));
+                    return this.tools;
+                } catch (err) {
+                    console.error(`[MCP ${this.name}] 获取工具列表失败:`, err);
+                    return [];
+                }
+            }
+
+            // 调用工具
+            async callTool(name, args = {}) {
+                console.log(`[MCP ${this.name}] 调用工具: ${name}`, args);
+                try {
+                    const result = await this.request('tools/call', {
+                        name,
+                        arguments: args,
+                    });
+                    console.log(`[MCP ${this.name}] 工具 ${name} 返回:`, result);
+                    return result;
+                } catch (err) {
+                    console.error(`[MCP ${this.name}] 工具 ${name} 调用失败:`, err);
+                    throw err;
+                }
+            }
+
+            // 断开连接
+            disconnect() {
+                if (this.eventSource) {
+                    this.eventSource.close();
+                    this.eventSource = null;
+                }
+                this.connected = false;
+                this.connecting = false;
+                console.log(`[MCP ${this.name}] 已断开连接`);
+            }
+        }
+
+        // MCP 管理器 - 管理多个服务器
+        const MCPManager = {
+            servers: new Map(),
+            activeServers: [], // 当前启用的服务器列表
+
+            // 添加服务器
+            addServer(config) {
+                const server = new MCPServer(config);
+                this.servers.set(server.id, server);
+                return server;
+            },
+
+            // 移除服务器
+            removeServer(id) {
+                const server = this.servers.get(id);
+                if (server) {
+                    server.disconnect();
+                    this.servers.delete(id);
+                    this.activeServers = this.activeServers.filter(s => s.id !== id);
+                }
+            },
+
+            // 获取所有服务器
+            getAllServers() {
+                return Array.from(this.servers.values());
+            },
+
+            // 连接服务器
+            async connectServer(id) {
+                const server = this.servers.get(id);
+                if (server) {
+                    await server.connect();
+                    // 如果不在 activeServers 中，添加进去
+                    if (!this.activeServers.find(s => s.id === id)) {
+                        this.activeServers.push(server);
+                    }
+                    return server;
+                }
+                throw new Error('服务器不存在');
+            },
+
+            // 断开服务器
+            async disconnectServer(id) {
+                const server = this.servers.get(id);
+                if (server) {
+                    server.disconnect();
+                    this.activeServers = this.activeServers.filter(s => s.id !== id);
+                }
+            },
+
+            // 调用工具（自动选择合适的服务器）
+            async callTool(toolName, args = {}) {
+                // 优先使用已连接的服务器
+                for (const server of this.activeServers) {
+                    const tool = server.tools.find(t => t.name === toolName);
+                    if (tool) {
+                        return await server.callTool(toolName, args);
+                    }
+                }
+                // 如果没找到，遍历所有服务器
+                for (const server of this.servers.values()) {
+                    const tool = server.tools.find(t => t.name === toolName);
+                    if (tool) {
+                        // 确保服务器已连接
+                        if (!server.connected) {
+                            try {
+                                await server.connect();
+                            } catch (e) {
+                                continue;
+                            }
+                        }
+                        return await server.callTool(toolName, args);
+                    }
+                }
+                throw new Error(`工具 ${toolName} 不存在`);
+            },
+
+            // 获取所有可用工具
+            getAllTools() {
+                const tools = [];
+                for (const server of this.activeServers) {
+                    for (const tool of server.tools) {
+                        tools.push({ ...tool, serverName: server.name, serverId: server.id });
+                    }
+                }
+                return tools;
+            },
+
+            // 测试连接
+            async testConnection(url) {
+                console.log('[MCP] 测试连接:', url);
+                const tempServer = new MCPServer({
+                    id: 'temp',
+                    name: 'Test',
+                    url: url,
+                });
+                try {
+                    const result = await tempServer.connect();
+                    tempServer.disconnect();
+                    return { success: true, tools: result.tools };
+                } catch (err) {
+                    return { success: false, error: err.message };
+                }
+            },
+
+            // 清除所有服务器
+            clearAll() {
+                for (const server of this.servers.values()) {
+                    server.disconnect();
+                }
+                this.servers.clear();
+                this.activeServers = [];
             },
         };
 
@@ -2495,6 +2772,228 @@ ${query}
             );
         };
 
+        // ========== MCP 配置组件 ==========
+        const MCPSettings = ({ mcpDrawerOpen, setMcpDrawerOpen, servers, setServers, activeServers, setActiveServers, mcpTools, setMcpTools, error, success }) => {
+            const [newServerUrl, setNewServerUrl] = useState('');
+            const [newServerName, setNewServerName] = useState('');
+            const [testingUrl, setTestingUrl] = useState(null);
+            const [testResult, setTestResult] = useState(null);
+
+            // 测试连接
+            const handleTestConnection = async () => {
+                if (!newServerUrl.trim()) {
+                    error('请输入 MCP 服务器地址');
+                    return;
+                }
+
+                setTestingUrl(newServerUrl.trim());
+                setTestResult(null);
+
+                try {
+                    const result = await MCPManager.testConnection(newServerUrl.trim());
+                    if (result.success) {
+                        setTestResult({ success: true, tools: result.tools });
+                        success(`连接成功！获取到 ${result.tools.length} 个工具`);
+                    } else {
+                        setTestResult({ success: false, error: result.error });
+                        error(`连接失败: ${result.error}`);
+                    }
+                } catch (err) {
+                    setTestResult({ success: false, error: err.message });
+                    error(`连接失败: ${err.message}`);
+                } finally {
+                    setTestingUrl(null);
+                }
+            };
+
+            // 添加服务器
+            const handleAddServer = () => {
+                if (!newServerUrl.trim()) {
+                    error('请输入 MCP 服务器地址');
+                    return;
+                }
+
+                const serverId = Date.now().toString();
+                const serverName = newServerName.trim() || `服务器 ${servers.length + 1}`;
+
+                const newServer = {
+                    id: serverId,
+                    name: serverName,
+                    url: newServerUrl.trim(),
+                    type: 'sse',
+                    connected: false,
+                    tools: testResult?.success ? testResult.tools : [],
+                };
+
+                // 同时添加到 MCPManager
+                MCPManager.addServer({
+                    id: serverId,
+                    name: serverName,
+                    url: newServerUrl.trim(),
+                    type: 'sse',
+                });
+
+                setServers([...servers, newServer]);
+                setNewServerUrl('');
+                setNewServerName('');
+                setTestResult(null);
+                success(`已添加 ${serverName}，点击连接按钮开始使用`);
+            };
+
+            // 删除服务器
+            const handleDeleteServer = (serverId) => {
+                setServers(servers.filter(s => s.id !== serverId));
+                setActiveServers(activeServers.filter(s => s.id !== serverId));
+                success('已删除服务器');
+            };
+
+            // 连接/断开服务器
+            const handleToggleServer = async (server) => {
+                if (server.connected) {
+                    // 断开
+                    await MCPManager.disconnectServer(server.id);
+                    setServers(servers.map(s => s.id === server.id ? { ...s, connected: false } : s));
+                    setActiveServers(activeServers.filter(s => s.id !== server.id));
+                    // 更新工具列表
+                    setMcpTools(MCPManager.getAllTools());
+                    success(`已断开 ${server.name}`);
+                } else {
+                    // 连接 - 先确保服务器在 MCPManager 中
+                    try {
+                        if (!MCPManager.servers.has(server.id)) {
+                            MCPManager.addServer({
+                                id: server.id,
+                                name: server.name,
+                                url: server.url,
+                                type: server.type || 'sse',
+                            });
+                        }
+                        await MCPManager.connectServer(server.id);
+                        const connectedServer = MCPManager.servers.get(server.id);
+                        setServers(servers.map(s => s.id === server.id ? { ...s, connected: true, tools: connectedServer?.tools || [] } : s));
+                        if (!activeServers.find(s => s.id === server.id)) {
+                            setActiveServers([...activeServers, { ...server, connected: true, tools: connectedServer?.tools || [] }]);
+                        }
+                        // 更新工具列表
+                        setMcpTools(MCPManager.getAllTools());
+                        success(`已连接 ${server.name}，获取到 ${connectedServer?.tools?.length || 0} 个工具`);
+                    } catch (err) {
+                        error(`连接失败: ${err.message}`);
+                    }
+                }
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setMcpDrawerOpen(false)}>
+                    <div className="bg-white dark:bg-gray-800 rounded-lg p-6 w-[560px] max-w-[90vw] max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                        <div className="flex justify-between items-center mb-4">
+                            <h2 className="text-lg font-semibold text-gray-900 dark:text-white">MCP 配置</h2>
+                            <button onClick={() => setMcpDrawerOpen(false)} className="text-gray-500 hover:text-gray-700">
+                                <X size={20} />
+                            </button>
+                        </div>
+
+                        {/* 添加服务器表单 */}
+                        <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4 mb-4">
+                            <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">添加 MCP 服务器</h3>
+                            <div className="space-y-3">
+                                <div>
+                                    <input
+                                        type="text"
+                                        value={newServerName}
+                                        onChange={e => setNewServerName(e.target.value)}
+                                        placeholder="服务器名称（可选）"
+                                        className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm"
+                                    />
+                                </div>
+                                <div>
+                                    <input
+                                        type="text"
+                                        value={newServerUrl}
+                                        onChange={e => setNewServerUrl(e.target.value)}
+                                        placeholder="https://mcp.api-inference.modelscope.net/xxx/mcp"
+                                        className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm"
+                                    />
+                                </div>
+                                <div className="text-xs text-gray-500 dark:text-gray-400">
+                                    <p>如遇 CORS 错误，推荐安装浏览器扩展：</p>
+                                    <p className="mt-1">"Allow CORS: Access-Control-Allow-Origin"</p>
+                                    <p className="mt-1">安装扩展后刷新页面重试</p>
+                                </div>
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={handleTestConnection}
+                                        disabled={testingUrl !== null}
+                                        className="flex-1 px-3 py-2 bg-gray-200 dark:bg-gray-600 hover:bg-gray-300 dark:hover:bg-gray-500 text-gray-700 dark:text-gray-200 rounded-lg text-sm transition-colors disabled:opacity-50"
+                                    >
+                                        {testingUrl ? '测试中...' : '测试连接'}
+                                    </button>
+                                    <button
+                                        onClick={handleAddServer}
+                                        disabled={!newServerUrl.trim()}
+                                        className="flex-1 px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm transition-colors disabled:opacity-50"
+                                    >
+                                        添加
+                                    </button>
+                                </div>
+                                {testResult && (
+                                    <div className={`text-sm p-2 rounded ${testResult.success ? 'bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300' : 'bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300'}`}>
+                                        {testResult.success ? `✓ 连接成功，获取到 ${testResult.tools.length} 个工具` : `✗ ${testResult.error}`}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* 服务器列表 */}
+                        <div className="flex-1 overflow-y-auto">
+                            <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">已配置的服务器 ({servers.length})</h3>
+                            {servers.length === 0 ? (
+                                <p className="text-sm text-gray-500 dark:text-gray-400 text-center py-4">暂无配置的服务器</p>
+                            ) : (
+                                <div className="space-y-2">
+                                    {servers.map(server => (
+                                        <div key={server.id} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                                            <div className="flex-1">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="font-medium text-gray-900 dark:text-white">{server.name}</span>
+                                                    <span className={`w-2 h-2 rounded-full ${server.connected ? 'bg-green-500' : 'bg-gray-400'}`}></span>
+                                                </div>
+                                                <p className="text-xs text-gray-500 dark:text-gray-400 truncate">{server.url}</p>
+                                                {server.tools?.length > 0 && (
+                                                    <p className="text-xs text-blue-500 mt-1">{server.tools.length} 个工具</p>
+                                                )}
+                                            </div>
+                                            <div className="flex gap-2">
+                                                <button
+                                                    onClick={() => handleToggleServer(server)}
+                                                    className={`px-3 py-1 rounded text-sm ${server.connected ? 'bg-red-100 dark:bg-red-900 text-red-600 dark:text-red-400 hover:bg-red-200' : 'bg-green-100 dark:bg-green-900 text-green-600 dark:text-green-400 hover:bg-green-200'}`}
+                                                >
+                                                    {server.connected ? '断开' : '连接'}
+                                                </button>
+                                                <button
+                                                    onClick={() => handleDeleteServer(server.id)}
+                                                    className="px-3 py-1 bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300 rounded text-sm hover:bg-gray-300"
+                                                >
+                                                    删除
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
+                            <div className="text-sm text-gray-500 dark:text-gray-400">
+                                <p>当前活跃服务器: {activeServers.length} | 可用工具: {mcpTools.length}</p>
+                                <p className="mt-1">MCP (Model Context Protocol) 可以让 AI 访问外部服务和工具。</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
         // ========== 知识库选择器组件 ==========
         const KnowledgeSelect = ({ knowledgeBases, selectedId, onChange, disabled }) => {
             const selectedKb = knowledgeBases.find(kb => kb.id === selectedId);
@@ -2719,10 +3218,24 @@ ${query}
             const [embeddingModelLoaded, setEmbeddingModelLoaded] = useState(() => localStorage.getItem('pudding_embedding_model_loaded') === 'true');
             const [showEmbeddingModal, setShowEmbeddingModal] = useState(false);
 
+            // MCP 相关状态 - 支持多服务器
+            const [mcpServers, setMcpServers] = useState(() => {
+                const saved = localStorage.getItem('pudding_mcp_servers');
+                return saved ? JSON.parse(saved) : [];
+            });
+            const [mcpActiveServers, setMcpActiveServers] = useState([]);
+            const [mcpTools, setMcpTools] = useState([]);
+            const [mcpDrawerOpen, setMcpDrawerOpen] = useState(false);
+
             // 知识库开关状态持久化
             useEffect(() => {
                 localStorage.setItem('pudding_knowledge_enabled', knowledgeEnabled);
             }, [knowledgeEnabled]);
+
+            // MCP 服务器列表持久化
+            useEffect(() => {
+                localStorage.setItem('pudding_mcp_servers', JSON.stringify(mcpServers));
+            }, [mcpServers]);
 
             const inputRef = useRef(null);
             const abortRef = useRef(null);
@@ -3419,6 +3932,39 @@ ${historyContext}
                 });
             }, []);
 
+            // 页面加载时自动连接已保存的 MCP 服务器
+            useEffect(() => {
+                if (mcpServers.length > 0) {
+                    // 自动连接之前保存的服务器
+                    const connectSavedServers = async () => {
+                        for (const server of mcpServers) {
+                            try {
+                                // 先添加到 MCPManager
+                                MCPManager.addServer({
+                                    id: server.id,
+                                    name: server.name,
+                                    url: server.url,
+                                    type: server.type || 'sse',
+                                });
+                                // 然后连接
+                                await MCPManager.connectServer(server.id);
+                                const connectedServer = MCPManager.servers.get(server.id);
+                                if (connectedServer) {
+                                    setMcpActiveServers(prev => [...prev, { ...server, connected: true, tools: connectedServer.tools }]);
+                                    setMcpTools(MCPManager.getAllTools());
+                                    success(`已自动连接: ${server.name}`);
+                                    console.log(`[MCP] 已自动连接: ${server.name}`);
+                                }
+                            } catch (err) {
+                                console.warn(`[MCP] 自动连接失败: ${server.name}`, err);
+                            }
+                        }
+                    };
+                    // 延迟一点执行，确保 MCPManager 已加载
+                    setTimeout(connectSavedServers, 500);
+                }
+            }, []);
+
             // 页面关闭前保存对话
             useEffect(() => {
                 const handleBeforeUnload = () => {
@@ -3476,6 +4022,7 @@ ${historyContext}
             // 自动保存对话到历史记录
             const saveConversation = useCallback(async () => {
                 const currentMessages = messagesRef.current;
+                console.log('[历史] 保存对话，currentConversationId:', currentConversationId, '消息数:', currentMessages.length);
 
                 // 检查是否有用户消息（必须要有用户消息才保存）
                 const hasUserMessage = currentMessages.some(m =>
@@ -3799,9 +4346,67 @@ ${historyContext}
                     // 2. 获取历史消息（用于查询重写）
                     const historyMessages = messages.slice(0, -1).slice(-20);
 
-                    // 3. 如果启用了知识库，进行检索（传入历史消息用于查询重写）
+                    // 3. 检查是否需要调用 MCP 工具（MCP 优先级高于知识库）
+                    const query = userMsg.content.toLowerCase();
+                    const weatherKeywords = ['天气', 'weather', '气温', '温度', '晴'];
+                    const timeKeywords = ['时间', 'time', '几点', '日期', '现在几'];
+                    const searchKeywords = ['搜索', '查找', '最新', '新闻', 'search', 'find', 'latest', 'news'];
+
+                    // 根据关键词选择合适的工具
+                    let selectedTool = null;
+                    if (weatherKeywords.some(k => query.includes(k))) {
+                        selectedTool = mcpTools.find(t => t.name === 'get_weather');
+                    } else if (timeKeywords.some(k => query.includes(k))) {
+                        selectedTool = mcpTools.find(t => t.name === 'get_time');
+                    } else if (searchKeywords.some(k => query.includes(k))) {
+                        selectedTool = mcpTools.find(t => t.name === 'web_search');
+                    }
+
+                    const needsMCP = mcpActiveServers.length > 0 && mcpTools.length > 0 && selectedTool;
+
+                    let mcpContext = '';
+                    if (needsMCP) {
+                        try {
+                            info(`正在调用 ${selectedTool.name}...`);
+                            let toolArgs = {};
+                            if (selectedTool.name === 'get_weather') {
+                                // 从消息中提取纯城市名（后面不跟其他中文字符）
+                                const cityList = ['北京', '上海', '广州', '深圳', '杭州', '成都', '武汉', '西安', '南京', '苏州', '重庆', '天津', '青岛', '沈阳', '长沙', '郑州', '济南', '哈尔滨', '长春', '福州', '南昌', '合肥', '昆明', '兰州'];
+                                let foundCity = '';
+                                for (const city of cityList) {
+                                    if (userMsg.content.includes(city)) {
+                                        foundCity = city;
+                                        break;
+                                    }
+                                }
+                                toolArgs.city = foundCity || ''; // 留空让服务器通过 IP 获取
+                            } else if (selectedTool.name === 'web_search') {
+                                toolArgs.query = userMsg.content;
+                            } else if (selectedTool.name === 'get_time') {
+                                toolArgs.timezone = 'Asia/Shanghai';
+                            }
+
+                            const mcpResult = await MCPManager.callTool(selectedTool.name, toolArgs);
+                            // 提取文本内容
+                            let mcpText = '';
+                            if (mcpResult.content && Array.isArray(mcpResult.content)) {
+                                mcpText = mcpResult.content.map(c => c.text).join('\n');
+                            } else if (typeof mcpResult === 'string') {
+                                mcpText = mcpResult;
+                            } else {
+                                mcpText = JSON.stringify(mcpResult, null, 2);
+                            }
+                            mcpContext = `\n\n【MCP 工具返回的信息】\n${mcpText}\n\n请根据以上实时信息回答用户。`;
+                            success('MCP 工具调用成功');
+                        } catch (err) {
+                            console.error('[MCP] 工具调用失败:', err);
+                            info('MCP 工具调用失败');
+                        }
+                    }
+
+                    // 4. 如果不需要 MCP 且启用了知识库，则进行知识库检索
                     let ragPrompt = userMsg.content;
-                    if (knowledgeEnabled) {
+                    if (!needsMCP && knowledgeEnabled) {
                         info('正在检索知识库...');
                         const chunks = await retrieveFromKnowledgeBase(userMsg.content, historyMessages);
                         currentRetrievedChunks = chunks;
@@ -3810,10 +4415,14 @@ ${historyContext}
                             ragPrompt = buildRAGPrompt(userMsg.content, chunks);
                             success(`已检索到 ${chunks.length} 条相关内容`);
                         } else {
-                            // 没有检索到结果时，提示 AI 给出特定回复
                             ragPrompt = `如果知识库中没有相关信息，请回复"暂时未检索出相关答复，我仍在学习中"。\n\n问题：${userMsg.content}`;
                             info('知识库中未找到相关内容');
                         }
+                    }
+
+                    // 将 MCP 结果添加到用户消息中（优先于知识库）
+                    if (mcpContext) {
+                        ragPrompt = ragPrompt + mcpContext;
                     }
 
                     // 4. 添加历史消息（排除最后一条空消息，限制最近 10 轮对话以避免 token 超出限制）
@@ -4064,6 +4673,20 @@ ${historyContext}
                         onDeleteDocument={handleDeleteDocument}
                         documents={knowledgeDocuments}
                     />
+                    {mcpDrawerOpen && (
+                        <MCPSettings
+                            mcpDrawerOpen={mcpDrawerOpen}
+                            setMcpDrawerOpen={setMcpDrawerOpen}
+                            servers={mcpServers}
+                            setServers={setMcpServers}
+                            activeServers={mcpActiveServers}
+                            setActiveServers={setMcpActiveServers}
+                            mcpTools={mcpTools}
+                            setMcpTools={setMcpTools}
+                            error={error}
+                            success={success}
+                        />
+                    )}
                     <div className="h-screen w-screen bg-white dark:bg-[#0a0a0a] text-gray-900 dark:text-white flex overflow-hidden transition-colors duration-300">
                         {/* 左侧导航栏 */}
                         <div className="w-16 bg-white dark:bg-[#0a0a0a] border-r border-gray-200 dark:border-[#27272a] flex flex-col items-center py-4 gap-4 transition-colors duration-300">
@@ -4095,6 +4718,15 @@ ${historyContext}
                                 title="知识库管理"
                             >
                                 <BookOpen size={20} className="text-gray-500 dark:text-zinc-400 group-hover:text-gray-900 dark:group-hover:text-white" />
+                            </button>
+
+                            <button
+                                onClick={() => setMcpDrawerOpen(true)}
+                                className="p-2.5 hover:bg-gray-200 dark:hover:bg-[#27272a] rounded-xl transition-colors group relative"
+                                title={mcpActiveServers.length > 0 ? `MCP 已连接 (${mcpActiveServers.length}个服务器)` : 'MCP 配置'}
+                            >
+                                <Plug size={20} className={mcpActiveServers.length > 0 ? 'text-emerald-500' : 'text-gray-500 dark:text-zinc-400 group-hover:text-gray-900 dark:group-hover:text-white'} />
+                                {mcpActiveServers.length > 0 && <span className="absolute top-1 right-1 w-2 h-2 bg-emerald-500 rounded-full"></span>}
                             </button>
 
                             <div className="flex-1"></div>
