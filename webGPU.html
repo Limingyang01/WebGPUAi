@@ -3200,11 +3200,18 @@ ${query}
             const [isGenerating, setIsGenerating] = useState(false);
             const [conversations, setConversations] = useState([]);
             const [currentConversationId, setCurrentConversationId] = useState(null);
+            const currentConversationIdRef = useRef(null);
             const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
             const [modelManagerOpen, setModelManagerOpen] = useState(false);
             const [knowledgeDrawerOpen, setKnowledgeDrawerOpen] = useState(false);
             const [cachedModels, setCachedModels] = useState([]);
             const [theme, setTheme] = useState(() => localStorage.getItem('pudding_theme') || 'dark');
+
+            // 同步 currentConversationId 到 ref，避免闭包中的过时值
+            useEffect(() => {
+                currentConversationIdRef.current = currentConversationId;
+            }, [currentConversationId]);
+
             const [themeAnimating, setThemeAnimating] = useState(false);
             const [themeAnimationOrigin, setThemeAnimationOrigin] = useState({ x: 0, y: 0, scaleSize: 50 });
 
@@ -4019,10 +4026,30 @@ ${historyContext}
                 }).catch(err => console.error('[历史] 加载历史记录失败:', err));
             }, []);
 
+            // 防抖：记录上次保存时间，防止频繁保存
+            const lastSaveTimeRef = useRef(0);
+            const isSavingRef = useRef(false);
+
             // 自动保存对话到历史记录
             const saveConversation = useCallback(async () => {
+                // 防止并发保存
+                if (isSavingRef.current) {
+                    console.log('[历史] 正在保存中，跳过');
+                    return;
+                }
+                isSavingRef.current = true;
+
+                // 防抖：2秒内不重复保存
+                const now = Date.now();
+                if (now - lastSaveTimeRef.current < 2000) {
+                    console.log('[历史] 2秒内已保存，跳过');
+                    isSavingRef.current = false;
+                    return;
+                }
+
                 const currentMessages = messagesRef.current;
-                console.log('[历史] 保存对话，currentConversationId:', currentConversationId, '消息数:', currentMessages.length);
+                const conversationId = currentConversationIdRef.current;
+                console.log('[历史] 保存对话，currentConversationId:', conversationId, '消息数:', currentMessages.length);
 
                 // 检查是否有用户消息（必须要有用户消息才保存）
                 const hasUserMessage = currentMessages.some(m =>
@@ -4080,32 +4107,29 @@ ${historyContext}
                 try {
                     console.log('[历史] 保存对话:', conversationData.title, conversationData.messages.length, '条消息');
 
-                    // 检查是否应该创建新对话（modelId 或 roleId 变化了）
-                    let shouldCreateNew = false;
-                    if (currentConversationId) {
-                        const existingConv = await ConversationDB.get(currentConversationId);
-                        if (existingConv && (existingConv.modelId !== modelId || existingConv.roleId !== roleId)) {
-                            console.log('[历史] 模型或角色变化，创建新对话');
-                            shouldCreateNew = true;
-                        }
-                    }
-
-                    if (currentConversationId && !shouldCreateNew) {
-                        await ConversationDB.update(currentConversationId, conversationData);
+                    // 如果有当前会话ID，直接更新现有对话（不再根据 modelId/roleId 变化创建新对话）
+                    if (conversationId) {
+                        await ConversationDB.update(conversationId, conversationData);
                         console.log('[历史] 更新成功');
                     } else {
+                        // 没有会话ID时创建新对话
                         const newConv = await ConversationDB.create(conversationData);
+                        currentConversationIdRef.current = newConv.id;
                         setCurrentConversationId(newConv.id);
                         console.log('[历史] 创建成功, id:', newConv.id);
                     }
                     // 刷新列表
                     const convs = await ConversationDB.getAll();
                     setConversations(convs);
+                    // 更新保存时间
+                    lastSaveTimeRef.current = Date.now();
                 } catch (err) {
                     console.error('[历史] 保存对话失败:', err);
                     error('保存对话失败');
+                } finally {
+                    isSavingRef.current = false;
                 }
-            }, [modelId, roleId, currentConversationId]);
+            }, [modelId, roleId]);
 
             // 新建对话
             const handleNewChat = async () => {
@@ -4123,6 +4147,7 @@ ${historyContext}
                 await saveConversation();
                 // 加载历史对话
                 setMessages(conversation.messages || []);
+                currentConversationIdRef.current = conversation.id;
                 setCurrentConversationId(conversation.id);
                 setModelId(conversation.modelId || '');
                 const model = MODEL_LIST.find(m => m.id === conversation.modelId);
@@ -4325,6 +4350,28 @@ ${historyContext}
                 // 自动聚焦输入框
                 setTimeout(() => inputRef.current?.focus(), 100);
 
+                // 如果没有当前会话ID，创建新对话（并保存用户消息）
+                if (!currentConversationIdRef.current) {
+                    const firstUserMessage = userMsg.content.slice(0, 30);
+                    const conversationData = {
+                        title: firstUserMessage || '新对话',
+                        modelId,
+                        roleId,
+                        messages: [{ role: 'user', content: userMsg.content, timestamp: userMsg.timestamp }]
+                    };
+                    try {
+                        const newConv = await ConversationDB.create(conversationData);
+                        currentConversationIdRef.current = newConv.id;
+                        setCurrentConversationId(newConv.id);
+                        console.log('[历史] 创建新对话，id:', newConv.id);
+                        // 刷新列表
+                        const convs = await ConversationDB.getAll();
+                        setConversations(convs);
+                    } catch (err) {
+                        console.error('[历史] 创建对话失败:', err);
+                    }
+                }
+
                 // 用于存储当前检索结果
                 let currentRetrievedChunks = [];
 
@@ -4476,8 +4523,8 @@ ${historyContext}
                 setIsGenerating(false);
                 abortRef.current = null;
 
-                // 保存对话到历史记录
-                saveConversation();
+                // 保存对话到历史记录（异步等待完成）
+                await saveConversation();
 
                 // AI 回复结束后聚焦输入框（延迟确保 disabled 已解除）
                 setTimeout(() => {
